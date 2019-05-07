@@ -41,6 +41,7 @@ tokio-io = "0.1"
 wasm-timer = "0.1"
 
 [target.'cfg(not(any(target_os = "emscripten", target_os = "unknown")))'.dependencies]
+libp2p-discv5 = { version = "0.1.0", path = "./misc/discv5" }
 libp2p-dns = { version = "0.7.0", path = "./transports/dns" }
 libp2p-mdns = { version = "0.7.0", path = "./misc/mdns" }
 libp2p-noise = { version = "0.5.0", path = "./protocols/noise" }
@@ -57,6 +58,7 @@ void = "1.0"
 members = [
     "core",
     "misc/core-derive",
+    "misc/discv5",
     "misc/mdns",
     "misc/multiaddr",
     "misc/multihash",

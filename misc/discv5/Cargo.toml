@@ -1,0 +1,32 @@
+[package]
+name = "libp2p-discv5"
+edition = "2018"
+version = "0.1.0"
+description = "Implementation of the devp2p discv5 discovery method"
+authors = ["Age Manning <Age@AgeManning.com>"]
+license = "MIT"
+repository = "https://github.com/libp2p/rust-libp2p"
+keywords = ["peer-to-peer", "libp2p", "networking", "discovery", "devp2p"]
+categories = ["network-programming", "asynchronous"]
+
+[dependencies]
+libp2p-core = { version = "0.7.0", path = "../../core" }
+multiaddr = { package = "parity-multiaddr", version = "0.4.0", path = "../multiaddr" }
+
+data-encoding = "2.0"
+futures = "0.1"
+log = "0.4"
+net2 = "0.2"
+rand = "0.6.5"
+smallvec = "0.6"
+wasm-timer = "0.1"
+tokio-reactor = "0.1.9"
+tokio-io = "0.1.12"
+tokio-udp = "0.1.3"
+void = "1.0"
+rlp = "0.3.0"
+sha2 = "0.8.0"
+
+[dev-dependencies]
+tokio = "0.1"
+simple_logger = "1.0.1"
