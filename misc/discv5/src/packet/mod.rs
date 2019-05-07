@@ -7,6 +7,7 @@ mod auth_header;
 
 use auth_header::AuthHeader;
 use log::debug;
+use rlp::Decodable;
 use std::default::Default;
 
 const TAG_LENGTH: usize = 32;
@@ -47,7 +48,7 @@ pub enum Packet {
         /// Authentication header.
         auth_header: AuthHeader,
         /// Message AES_GCM encrypted with with the authentication header.
-        message: Box<[u8]>,
+        message: Box<Vec<u8>>,
     },
     /// A standard discv5 message.
     Message {
@@ -131,12 +132,7 @@ impl Packet {
         tag.clone_from_slice(&data[0..TAG_LENGTH]);
 
         // initially look for a WHOAREYOU packet
-        let who_packet_len = TAG_LENGTH + MAGIC_LENGTH + AUTH_TAG_LENGTH + ID_NONCE_LENGTH + 2 + 4; // not different constants will change RLP length
-        debug!(
-            "data len: {:?} who paket len: {:?}",
-            data.len(),
-            who_packet_len
-        );
+        let who_packet_len = TAG_LENGTH + MAGIC_LENGTH + AUTH_TAG_LENGTH + ID_NONCE_LENGTH + 2 + 4; // note different constants will change RLP length
         if &data[TAG_LENGTH..TAG_LENGTH + MAGIC_LENGTH] == magic_data
             && data.len() == who_packet_len
         {
@@ -154,25 +150,22 @@ impl Packet {
             // build objects
             let mut magic: [u8; MAGIC_LENGTH] = Default::default();
             magic.clone_from_slice(&data[TAG_LENGTH..TAG_LENGTH + MAGIC_LENGTH]);
-            let enr_seq_bytes = decoded_list.pop().ok_or_else(|| {
-                debug!("ENR not found");
-                PacketError::UnknownFormat
-            })?;
+
+            if decoded_list.len() != 3 {
+                debug!("Failed to decode WHOAREYOU packet. Incorrect list size. Length: {}, expected 3", decoded_list.len());
+                return Err(PacketError::UnknownFormat);
+            }
+
+            let enr_seq_bytes = decoded_list.pop().expect("List is long enough");
             let mut enr_seq: [u8; 2] = Default::default();
             enr_seq.clone_from_slice(&enr_seq_bytes);
             let enr_seq = u16::from_be_bytes(enr_seq);
 
-            let id_nonce_bytes = decoded_list.pop().ok_or_else(|| {
-                debug!("Nonce not found");
-                PacketError::UnknownFormat
-            })?;
+            let id_nonce_bytes = decoded_list.pop().expect("List is long enough");
             let mut id_nonce: [u8; ID_NONCE_LENGTH] = Default::default();
             id_nonce.clone_from_slice(&id_nonce_bytes);
 
-            let token_bytes = decoded_list.pop().ok_or_else(|| {
-                debug!("Token not found");
-                PacketError::UnknownFormat
-            })?;
+            let token_bytes = decoded_list.pop().expect("List is long enough");
             let mut token: AuthTag = Default::default();
             token.clone_from_slice(&token_bytes);
 
@@ -209,7 +202,32 @@ impl Packet {
                 message: Box::new(data[TAG_LENGTH + AUTH_TAG_LENGTH + 1..].to_vec()),
             });
         }
-        // else if { // check for rlp header  }
+        // not a Random Packet or standard message, may be a message with authentication header
+        let rlp = rlp::Rlp::new(&data[TAG_LENGTH..]);
+        if rlp.is_list() {
+            // potentially authentication header
+
+            let rlp_length = rlp
+                .payload_info()
+                .map_err(|_| {
+                    debug!("Could not determine Auth header rlp length");
+                    PacketError::UnknownFormat
+                })?
+                .total();
+
+            let auth_header_rlp = rlp::Rlp::new(&data[TAG_LENGTH..TAG_LENGTH + rlp_length]);
+            let auth_header =
+                AuthHeader::decode(&auth_header_rlp).map_err(|_| PacketError::UnknownFormat)?;
+
+            let message_start = TAG_LENGTH + rlp_length;
+            let message = Box::new(data[message_start..].to_vec());
+
+            return Ok(Packet::AuthMessage {
+                tag,
+                auth_header,
+                message,
+            });
+        }
 
         // the data is unrecognizable or corrupt.
         debug!("Failed identifying message: {:?}", data);
@@ -227,6 +245,7 @@ pub enum PacketError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libp2p_core::identity::Keypair;
     use rand;
     use sha2::{Digest, Sha256};
     use simple_logger;
@@ -282,6 +301,39 @@ mod tests {
 
         let encoded_packet = packet.clone().encode();
         let decoded_packet = Packet::decode(&encoded_packet, &magic).unwrap();
+
+        assert_eq!(decoded_packet, packet);
+    }
+
+    #[test]
+    fn encode_decode_auth_packet() {
+        let _ = simple_logger::init();
+        let tag = hash256_to_fixed_array("test-tag");
+
+        // auth header data
+        let auth_tag: [u8; AUTH_TAG_LENGTH] = rand::random();
+        let ephemeral_pubkey = Keypair::generate_secp256k1().public();
+        let auth_response: [u8; 32] = rand::random();
+        let auth_response = Box::new(auth_response.to_vec());
+
+        let auth_header = AuthHeader {
+            auth_tag,
+            auth_scheme_name: "gsm",
+            ephemeral_pubkey,
+            auth_response,
+        };
+
+        let message: [u8; 16] = rand::random();
+        let message = Box::new(message.to_vec());
+
+        let packet = Packet::AuthMessage {
+            tag,
+            auth_header,
+            message,
+        };
+
+        let encoded_packet = packet.clone().encode();
+        let decoded_packet = Packet::decode(&encoded_packet, &tag).unwrap();
 
         assert_eq!(decoded_packet, packet);
     }
