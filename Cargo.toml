@@ -59,6 +59,7 @@ members = [
     "core",
     "misc/core-derive",
     "misc/discv5",
+    "misc/discv5/enr",
     "misc/mdns",
     "misc/multiaddr",
     "misc/multihash",

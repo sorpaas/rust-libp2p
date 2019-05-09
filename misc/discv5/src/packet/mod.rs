@@ -10,9 +10,9 @@ use log::debug;
 use rlp::Decodable;
 use std::default::Default;
 
-const TAG_LENGTH: usize = 32;
+pub const TAG_LENGTH: usize = 32;
 const AUTH_TAG_LENGTH: usize = 12;
-const MAGIC_LENGTH: usize = 32;
+pub const MAGIC_LENGTH: usize = 32;
 const ID_NONCE_LENGTH: usize = 12;
 
 /// The authentication nonce (12 bytes).
@@ -40,7 +40,7 @@ pub enum Packet {
         /// The `id-nonce` to prevent handshake replays.
         id_nonce: [u8; ID_NONCE_LENGTH],
         /// Highest known ENR sequence number of node.
-        enr_seq: u16,
+        enr_seq: u64,
     },
     /// Message sent with an extended authentication header.
     AuthMessage {
@@ -82,7 +82,7 @@ impl Packet {
                 enr_seq,
             } => {
                 let mut buf = Vec::with_capacity(
-                    TAG_LENGTH + MAGIC_LENGTH + AUTH_TAG_LENGTH + ID_NONCE_LENGTH + 2 + 2,
+                    TAG_LENGTH + MAGIC_LENGTH + AUTH_TAG_LENGTH + ID_NONCE_LENGTH + 8 + 2,
                 ); // + enr + rlp
                 buf.extend_from_slice(&tag);
                 buf.extend_from_slice(&magic);
@@ -157,9 +157,9 @@ impl Packet {
             }
 
             let enr_seq_bytes = decoded_list.pop().expect("List is long enough");
-            let mut enr_seq: [u8; 2] = Default::default();
+            let mut enr_seq: [u8; 8] = Default::default();
             enr_seq.clone_from_slice(&enr_seq_bytes);
-            let enr_seq = u16::from_be_bytes(enr_seq);
+            let enr_seq = u64::from_be_bytes(enr_seq);
 
             let id_nonce_bytes = decoded_list.pop().expect("List is long enough");
             let mut id_nonce: [u8; ID_NONCE_LENGTH] = Default::default();
@@ -233,6 +233,18 @@ impl Packet {
         debug!("Failed identifying message: {:?}", data);
         Err(PacketError::UnknownPacket)
     }
+
+    /// Generates a Packet::Random given a `tag`.
+    pub fn random(tag: Tag) -> Packet {
+        let data: Vec<u8> = (0..44).map(|_| rand::random::<u8>()).collect();
+        let data = Box::new(data);
+
+        Packet::RandomPacket {
+            tag,
+            auth_tag: rand::random(),
+            data,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -289,7 +301,7 @@ mod tests {
         let magic = hash256_to_fixed_array("magic");
         let id_nonce: [u8; ID_NONCE_LENGTH] = rand::random();
         let token: [u8; AUTH_TAG_LENGTH] = rand::random();
-        let enr_seq: u16 = rand::random();
+        let enr_seq: u64 = rand::random();
 
         let packet = Packet::WhoAreYou {
             tag,

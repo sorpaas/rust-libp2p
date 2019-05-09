@@ -4,6 +4,6 @@
 //! peer-to-peer network.
 
 // mod behaviour;
-mod packet;
+pub mod packet;
 
 pub mod service;
