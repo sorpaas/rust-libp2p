@@ -7,9 +7,7 @@ edition = "2018"
 [dependencies]
 libp2p-core = { version = "0.7.0", path = "../../../core" }
 rlp = "0.3.0"
-sha2 = "0.8.0"
 log = "0.4"
-hex = "0.3.2"
 secp256k1 = "0.12.2"
 sha3 = "0.8.2"
 
