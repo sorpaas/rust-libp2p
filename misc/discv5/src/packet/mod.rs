@@ -10,6 +10,7 @@ use log::debug;
 use rlp::Decodable;
 use std::default::Default;
 
+pub const NODE_ID_LENGTH: usize = 32;
 pub const TAG_LENGTH: usize = 32;
 const AUTH_TAG_LENGTH: usize = 12;
 pub const MAGIC_LENGTH: usize = 32;
@@ -19,6 +20,8 @@ const ID_NONCE_LENGTH: usize = 12;
 pub type AuthTag = [u8; AUTH_TAG_LENGTH];
 /// Packet Tag
 pub type Tag = [u8; TAG_LENGTH];
+/// ENR NodeId. This is the keccak256 hash of the uncompressed public key of the ENR record.
+pub type NodeId = [u8; NODE_ID_LENGTH];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Packet {

@@ -18,15 +18,15 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{dns, META_QUERY_SERVICE, SERVICE_NAME};
+use crate::{SERVICE_NAME, META_QUERY_SERVICE, dns};
 use dns_parser::{Packet, RData};
 use futures::{prelude::*, task};
 use libp2p_core::{Multiaddr, PeerId};
 use multiaddr::Protocol;
 use std::{fmt, io, net::Ipv4Addr, net::SocketAddr, str, time::Duration};
 use tokio_reactor::Handle;
-use tokio_udp::UdpSocket;
 use wasm_timer::{Instant, Interval};
+use tokio_udp::UdpSocket;
 
 pub use dns::MdnsResponseError;
 
@@ -99,7 +99,7 @@ pub struct MdnsService {
     /// Interval for sending queries.
     query_interval: Interval,
     /// Whether we send queries on the network at all.
-    /// Note tHAT we still need to have an interval for querying, as we need to wake up the socket
+    /// Note that we still need to have an interval for querying, as we need to wake up the socket
     /// regularly to recover from errors. Otherwise we could simply use an `Option<Interval>`.
     silent: bool,
     /// Buffer used for receiving data from the main socket.
@@ -132,9 +132,7 @@ impl MdnsService {
                 Ok(())
             }
             #[cfg(not(unix))]
-            fn platform_specific(_: &net2::UdpBuilder) -> io::Result<()> {
-                Ok(())
-            }
+            fn platform_specific(_: &net2::UdpBuilder) -> io::Result<()> { Ok(()) }
             let builder = net2::UdpBuilder::new_v4()?;
             builder.reuse_address(true)?;
             platform_specific(&builder)?;
@@ -539,10 +537,10 @@ impl<'a> fmt::Debug for MdnsPeer<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::service::{MdnsPacket, MdnsService};
     use libp2p_core::PeerId;
     use std::{io, time::Duration};
     use tokio::{self, prelude::*};
+    use crate::service::{MdnsPacket, MdnsService};
 
     #[test]
     fn discover_ourselves() {
@@ -557,9 +555,7 @@ mod tests {
 
                 match packet {
                     MdnsPacket::Query(query) => {
-                        query
-                            .respond(peer_id.clone(), None, Duration::from_secs(120))
-                            .unwrap();
+                        query.respond(peer_id.clone(), None, Duration::from_secs(120)).unwrap();
                     }
                     MdnsPacket::Response(response) => {
                         for peer in response.discovered_peers() {
