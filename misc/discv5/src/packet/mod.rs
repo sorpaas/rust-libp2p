@@ -22,6 +22,8 @@ pub type AuthTag = [u8; AUTH_TAG_LENGTH];
 pub type Tag = [u8; TAG_LENGTH];
 /// ENR NodeId. This is the keccak256 hash of the uncompressed public key of the ENR record.
 pub type NodeId = [u8; NODE_ID_LENGTH];
+/// The nonce sent in a WHOAREYOU packet.
+pub type Nonce = [u8; ID_NONCE_LENGTH];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Packet {
