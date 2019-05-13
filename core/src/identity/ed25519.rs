@@ -24,6 +24,8 @@ use ed25519_dalek as ed25519;
 use failure::Fail;
 use super::error::DecodingError;
 use zeroize::Zeroize;
+use ed25519_dalek::Digest;
+use typenum::U64;
 
 /// An Ed25519 keypair.
 pub struct Keypair(ed25519::Keypair);
@@ -52,6 +54,14 @@ impl Keypair {
     /// Sign a message using the private key of this keypair.
     pub fn sign(&self, msg: &[u8]) -> Vec<u8> {
         self.0.sign(msg).to_bytes().to_vec()
+    }
+
+    /// Sign a 512 bit message using the private key of this keypair. The optional `context` is concatenated
+    /// into the hash which is then signed to produce application-specific signatures.
+    pub fn sign_prehashed<D>(&self, prehashed_msg: D, context: Option<&'static [u8]>) -> Vec<u8>
+        where D: Digest<OutputSize = U64>
+    {
+        self.0.sign_prehashed(prehashed_msg, context).to_bytes().to_vec()
     }
 
     /// Get the public key of this keypair.
@@ -101,6 +111,13 @@ impl PublicKey {
     /// Verify the Ed25519 signature on a message using the public key.
     pub fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
         ed25519::Signature::from_bytes(sig).map(|s| self.0.verify(msg, &s)).is_ok()
+    }
+
+    /// Verify the Ed25519 signature on a pre-hashed message with an optional context using the public key.
+    pub fn verify_prehashed<D>(&self, prehashed_msg: D, context: Option<&[u8]>, sig: &[u8]) -> bool 
+        where D: Digest<OutputSize = U64>
+    {
+        ed25519::Signature::from_bytes(sig).map(|s| self.0.verify_prehashed(prehashed_msg, context, &s)).is_ok()
     }
 
     /// Encode the public key into a byte array in compressed form, i.e.
