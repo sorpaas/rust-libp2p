@@ -2,10 +2,12 @@
 //!
 //! This crate contains an Ethereum Node Record as specified by [EIP-778](https://eips.ethereum.org/EIPS/eip-778) extended to allow for the use of a range of public key types.
 
+mod enr_keypair;
+
+use crate::enr_keypair::{EnrKeypair, EnrPublicKey};
 use libp2p_core::identity::{ed25519, Keypair, PublicKey};
 use log::debug;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
-use secp256k1::Signature;
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -34,21 +36,11 @@ impl Enr {
     /// hash of the public key. ENR record cannot be created without a valid public key.
     /// Therefore this will always return a value.
     pub fn node_id(&self) -> [u8; 32] {
-        let pubkey_bytes = {
-            if let Some(pubkey_bytes) = self.content.get("secp256k1") {
-                // convert to the uncompressed encoding
-                secp256k1::PublicKey::from_slice(pubkey_bytes)
-                    .and_then(|pk| Ok(pk.serialize_uncompressed().to_vec()))
-                    .unwrap_or_else(|_| Vec::new())
-            } else if let Some(pubkey_bytes) = self.content.get("ed25519") {
-                pubkey_bytes.to_vec()
-            } else if let Some(pubkey_bytes) = self.content.get("rsa") {
-                pubkey_bytes.to_vec()
-            } else {
-                // should never reach here
-                Vec::new()
-            }
-        };
+        let pubkey_bytes: Vec<u8> = self
+            .pubkey()
+            .and_then(|pk| Some(EnrPublicKey::from(pk).encode_uncompressed()))
+            .unwrap_or_else(|| Vec::new()); // should never not have a public key.
+
         let mut node_id: [u8; 32] = [0; 32];
         let hash = Keccak256::digest(&pubkey_bytes);
         node_id.copy_from_slice(&hash);
@@ -64,22 +56,18 @@ impl Enr {
         keypair: Keypair,
     ) -> Result<bool, EnrError> {
         self.content.insert(key.into(), value);
-        self.set_pubkey(&keypair);
+        // add the new public key
+        // convert the libp2p keypair into an EnrKeypair
+        let enr_keypair = EnrKeypair::from(keypair);
+        self.content
+            .insert(enr_keypair.clone().into(), enr_keypair.public().encode());
         // increment the sequence number
         self.seq += 1;
-        let hash = Keccak256::digest(&self.rlp_content);
 
         // construct compact signature
-        let signature = {
-            let der_signature = keypair
-                .sign_raw(&hash)
-                .map_err(|_| EnrError::SigningError)?;
-            Signature::from_der(&der_signature)
-                .map_err(|_| EnrError::SigningError)?
-                .serialize_compact()
-                .to_vec()
-        };
-
+        let signature = enr_keypair
+            .sign(&self.rlp_content())
+            .map_err(|_| EnrError::SigningError)?;
         // check the size of the record
         if self.rlp_content.len() + signature.len() + 8 > MAX_ENR_SIZE {
             return Err(EnrError::ExceedsMaxSize);
@@ -88,7 +76,6 @@ impl Enr {
         Ok(true)
     }
 
-    /* Potentially not needed
     /// Evaluates the RLP content of the ENR record.
     fn rlp_content(&self) -> Vec<u8> {
         let mut stream = RlpStream::new();
@@ -100,7 +87,6 @@ impl Enr {
         }
         stream.drain()
     }
-    */
 
     pub fn set_ip(&mut self, ip: IpAddr, keypair: Keypair) -> Result<bool, EnrError> {
         let ip_bytes = match ip {
@@ -119,15 +105,9 @@ impl Enr {
     }
 
     pub fn set_pubkey(&mut self, keypair: &Keypair) {
-        let (pubkey_string, pubkey_bytes) = match keypair.public() {
-            PublicKey::Ed25519(key) => (String::from("ed25519"), key.encode().to_vec()),
-            PublicKey::Rsa(key) => (String::from("rsa"), key.encode_x509().to_vec()),
-            PublicKey::Secp256k1(key) => {
-                // uses compressed form, single point, 33 bytes
-                (String::from("secp256k1"), key.encode().to_vec())
-            }
-        };
-        self.content.insert(pubkey_string, pubkey_bytes);
+        let enr_kp = EnrKeypair::from(keypair.clone());
+        self.content
+            .insert(enr_kp.clone().into(), enr_kp.public().encode());
     }
 
     /// Returns the IP address of the ENR record if it is defined.
@@ -190,8 +170,6 @@ impl Enr {
     pub fn pubkey(&self) -> Option<PublicKey> {
         // try known pubkeys.
         // TODO: Build a mapping of known pubkeys
-        // secp256k1
-
         if let Some(pubkey_bytes) = self.content.get("secp256k1") {
             return libp2p_secp256k1::PublicKey::decode(pubkey_bytes)
                 .map(PublicKey::Secp256k1)
@@ -210,14 +188,9 @@ impl Enr {
 
     /// Verify the signature of the ENR record.
     pub fn verify(&self) -> bool {
-        let keccak_hash = Keccak256::digest(&self.rlp_content);
-
         if let Some(pubkey) = self.pubkey() {
-            if let Ok(sig) =
-                Signature::from_compact(&self.signature).and_then(|s| Ok(s.serialize_der()))
-            {
-                return pubkey.verify_raw(&keccak_hash, &sig);
-            }
+            let enr_pubkey = EnrPublicKey::from(pubkey);
+            return enr_pubkey.verify(&self.rlp_content, &self.signature);
         }
         false
     }
@@ -287,30 +260,20 @@ impl EnrBuilder {
     }
 
     fn add_pubkey(&mut self, key: &Keypair) {
-        let (pubkey_string, pubkey_bytes) = match key.public() {
-            PublicKey::Ed25519(key) => (String::from("ed25519"), key.encode().to_vec()),
-            PublicKey::Rsa(key) => (String::from("rsa"), key.encode_x509().to_vec()),
-            PublicKey::Secp256k1(key) => {
-                // uses compressed form, single point, 33 bytes
-                (String::from("secp256k1"), key.encode().to_vec())
-            }
-        };
-        self.add_value(pubkey_string, pubkey_bytes);
+        let enr_keypair = EnrKeypair::from(key.clone());
+        self.add_value(enr_keypair.clone().into(), enr_keypair.public().encode());
     }
 
     pub fn build(&mut self, key: &Keypair) -> Result<Enr, EnrError> {
         self.add_pubkey(key);
         let rlp_content = self.rlp_content();
-        let hash = Keccak256::digest(&rlp_content);
+
+        let enr_key = EnrKeypair::from(key.clone());
 
         // construct compact signature
-        let signature = {
-            let der_signature = key.sign_raw(&hash).map_err(|_| EnrError::SigningError)?;
-            Signature::from_der(&der_signature)
-                .map_err(|_| EnrError::SigningError)?
-                .serialize_compact()
-                .to_vec()
-        };
+        let signature = enr_key
+            .sign(&rlp_content)
+            .map_err(|_| EnrError::SigningError)?;
 
         // check the size of the record
         if rlp_content.len() + signature.len() + 8 > MAX_ENR_SIZE {
@@ -441,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_decode() {
+    fn test_encode_decode_secp256k1() {
         let key = Keypair::generate_secp256k1();
 
         let id = "v5";
@@ -452,7 +415,7 @@ mod tests {
             let mut builder = EnrBuilder::new();
             builder.id(id);
             builder.ip(ip.into());
-            builder.tcp(3000);
+            builder.tcp(tcp);
             builder.build(&key).unwrap()
         };
 
@@ -466,4 +429,67 @@ mod tests {
         assert_eq!(decoded_enr.pubkey(), Some(key.public()));
     }
 
+    #[test]
+    fn test_encode_decode_ed25519() {
+        let key = Keypair::generate_ed25519();
+
+        let id = "v5";
+        let ip = Ipv4Addr::new(10, 0, 0, 1);
+        let tcp = 30303;
+
+        let enr = {
+            let mut builder = EnrBuilder::new();
+            builder.id(id);
+            builder.ip(ip.into());
+            builder.tcp(tcp);
+            builder.build(&key).unwrap()
+        };
+
+        let encoded_enr = rlp::encode(&enr);
+        let decoded_enr = rlp::decode::<Enr>(&encoded_enr).unwrap();
+
+        assert_eq!(decoded_enr.id(), Some(id.into()));
+        assert_eq!(decoded_enr.ip(), Some(ip.into()));
+        assert_eq!(decoded_enr.tcp(), Some(tcp));
+        assert_eq!(decoded_enr.pubkey(), Some(key.public()));
+    }
+
+    #[test]
+    fn test_add_key() {
+        let key = Keypair::generate_secp256k1();
+        let id = "v5";
+        let ip = Ipv4Addr::new(10, 0, 0, 1);
+        let tcp = 30303;
+
+        let mut enr = {
+            let mut builder = EnrBuilder::new();
+            builder.id(id);
+            builder.ip(ip.into());
+            builder.tcp(tcp);
+            builder.build(&key).unwrap()
+        };
+
+        assert!(enr.add_key("random", Vec::new(), key).unwrap());
+    }
+
+    #[test]
+    fn test_set_tcp() {
+        let key = Keypair::generate_secp256k1();
+        let id = "v5";
+        let tcp = 30303;
+        let ip = Ipv4Addr::new(10, 0, 0, 1);
+
+        let mut enr = {
+            let mut builder = EnrBuilder::new();
+            builder.id(id);
+            builder.tcp(tcp);
+            builder.build(&key).unwrap()
+        };
+
+        assert!(enr.set_ip(ip.into(), key.clone()).unwrap());
+        assert_eq!(enr.id(), Some(id.into()));
+        assert_eq!(enr.ip(), Some(ip.into()));
+        assert_eq!(enr.tcp(), Some(tcp));
+        assert_eq!(enr.pubkey(), Some(key.public()));
+    }
 }

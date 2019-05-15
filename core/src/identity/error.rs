@@ -27,18 +27,24 @@ use std::fmt;
 #[derive(Debug)]
 pub struct DecodingError {
     msg: String,
-    source: Option<Box<dyn Error + Send + Sync>>
+    source: Option<Box<dyn Error + Send + Sync>>,
 }
 
 impl DecodingError {
     pub(crate) fn new(msg: &str, source: impl Error + Send + Sync + 'static) -> DecodingError {
-        DecodingError { msg: msg.to_string(), source: Some(Box::new(source)) }
+        DecodingError {
+            msg: msg.to_string(),
+            source: Some(Box::new(source)),
+        }
     }
 }
 
 impl From<String> for DecodingError {
     fn from(s: String) -> DecodingError {
-        DecodingError { msg: s, source: None }
+        DecodingError {
+            msg: s,
+            source: None,
+        }
     }
 }
 
@@ -58,13 +64,16 @@ impl Error for DecodingError {
 #[derive(Debug)]
 pub struct SigningError {
     msg: String,
-    source: Option<Box<dyn Error + Send + Sync>>
+    source: Option<Box<dyn Error + Send + Sync>>,
 }
 
 /// An error during encoding of key material.
 impl SigningError {
     pub(crate) fn new(msg: &str, source: impl Error + Send + Sync + 'static) -> SigningError {
-        SigningError { msg: msg.to_string(), source: Some(Box::new(source)) }
+        SigningError {
+            msg: msg.to_string(),
+            source: Some(Box::new(source)),
+        }
     }
 }
 
@@ -76,7 +85,10 @@ impl fmt::Display for SigningError {
 
 impl From<String> for SigningError {
     fn from(s: String) -> SigningError {
-        SigningError { msg: s, source: None }
+        SigningError {
+            msg: s,
+            source: None,
+        }
     }
 }
 
@@ -85,4 +97,3 @@ impl Error for SigningError {
         self.source.as_ref().map(|s| &**s as &dyn Error)
     }
 }
-
