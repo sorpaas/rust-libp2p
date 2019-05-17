@@ -115,12 +115,12 @@ impl Enr {
         if let Some(ip_bytes) = self.content.get("ip") {
             return match ip_bytes.len() {
                 4 => {
-                    let mut ip: [u8; 4] = [0; 4];
+                    let mut ip = [0u8; 4];
                     ip.copy_from_slice(ip_bytes);
                     Some(IpAddr::from(ip))
                 }
                 16 => {
-                    let mut ip: [u8; 16] = [0; 16];
+                    let mut ip = [0u8; 16];
                     ip.copy_from_slice(ip_bytes);
                     Some(IpAddr::from(ip))
                 }
@@ -142,7 +142,7 @@ impl Enr {
     pub fn tcp(&self) -> Option<u16> {
         if let Some(tcp_bytes) = self.content.get("tcp") {
             if tcp_bytes.len() <= 2 {
-                let mut tcp: [u8; 2] = [0; 2];
+                let mut tcp = [0u8; 2];
                 tcp[2 - tcp_bytes.len()..].copy_from_slice(tcp_bytes);
                 return Some(u16::from_be_bytes(tcp));
             }
@@ -154,7 +154,7 @@ impl Enr {
     pub fn udp(&self) -> Option<u16> {
         if let Some(udp_bytes) = self.content.get("udp") {
             if udp_bytes.len() <= 2 {
-                let mut udp: [u8; 2] = [0; 2];
+                let mut udp = [0u8; 2];
                 udp[2 - udp_bytes.len()..].copy_from_slice(udp_bytes);
                 return Some(u16::from_be_bytes(udp));
             }
