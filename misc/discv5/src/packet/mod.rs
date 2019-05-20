@@ -5,7 +5,7 @@
 
 mod auth_header;
 
-use auth_header::AuthHeader;
+pub use auth_header::AuthHeader;
 use log::debug;
 use rlp::Decodable;
 use std::default::Default;
@@ -137,7 +137,7 @@ impl Packet {
         tag.clone_from_slice(&data[0..TAG_LENGTH]);
 
         // initially look for a WHOAREYOU packet
-        let who_packet_len = TAG_LENGTH + MAGIC_LENGTH + AUTH_TAG_LENGTH + ID_NONCE_LENGTH + 2 + 4; // note different constants will change RLP length
+        let who_packet_len = TAG_LENGTH + MAGIC_LENGTH + AUTH_TAG_LENGTH + ID_NONCE_LENGTH + 8 + 4; // note different constants will change RLP length
         if &data[TAG_LENGTH..TAG_LENGTH + MAGIC_LENGTH] == magic_data
             && data.len() == who_packet_len
         {

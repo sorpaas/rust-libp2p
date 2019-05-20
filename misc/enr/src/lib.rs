@@ -18,10 +18,10 @@ use libp2p_core::identity::secp256k1 as libp2p_secp256k1;
 const MAX_ENR_SIZE: usize = 300;
 
 /// ENR Record
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Enr {
     /// ENR sequence number.
-    seq: u64,
+    pub seq: u64,
     /// Key-value contents of the ENR.
     content: HashMap<String, Vec<u8>>,
     /// RLP-encoded content. This exists because Hashmaps do not preserve ordering and the signature

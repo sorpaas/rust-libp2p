@@ -22,7 +22,7 @@ pub fn generate(
     local_enr: &Enr,
     remote_enr: &Enr,
     id_nonce: &Nonce,
-) -> Result<([u8; 32], [u8; 32], Vec<u8>), Discv5Error> {
+) -> Result<([u8; 16], [u8; 16], [u8; 16], PublicKey), Discv5Error> {
     // verify we know the public key and it's type
     let pubkey = remote_enr
         .pubkey()
@@ -50,7 +50,14 @@ pub fn generate(
 
             let secret = secp256k1::ecdh::SharedSecret::new(&remote_pk, &ephem_sk);
 
-            (secret, ephem_pk.serialize())
+            // convert to a libp2p public key
+            // TODO: It may be more sensible to leave as a raw encoded public key
+            let libp2p_pk =
+                libp2p_core::identity::secp256k1::PublicKey::decode(&ephem_pk.serialize())
+                    .expect("Valid public key");
+            let ephem_pk = PublicKey::Secp256k1(libp2p_pk);
+
+            (secret, ephem_pk)
         }
     };
 
@@ -61,13 +68,15 @@ pub fn generate(
 
     let hk = Hkdf::<Sha256>::extract(Some(&secret[..]), id_nonce);
 
-    let mut okm = [0u8; 64];
+    let mut okm = [0u8; 48];
     hk.expand(&info, &mut okm)
         .map_err(|_| Discv5Error::KeyDerivationFailed)?;
 
-    let mut initiator_key = [0u8; 32];
-    let mut auth_resp_key = [0u8; 32];
-    initiator_key.copy_from_slice(&okm[0..32]);
-    auth_resp_key.copy_from_slice(&okm[32..64]);
-    Ok((initiator_key, auth_resp_key, ephem_pk.to_vec()))
+    let mut initiator_key = [0u8; 16];
+    let mut responder_key = [0u8; 16];
+    let mut auth_resp_key = [0u8; 16];
+    initiator_key.copy_from_slice(&okm[0..16]);
+    responder_key.copy_from_slice(&okm[16..32]);
+    auth_resp_key.copy_from_slice(&okm[32..48]);
+    Ok((initiator_key, responder_key, auth_resp_key, ephem_pk))
 }

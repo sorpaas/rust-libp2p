@@ -1,4 +1,5 @@
 use super::AuthTag;
+use enr::Enr;
 use libp2p_core::identity::PublicKey;
 use log::debug;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
@@ -26,6 +27,26 @@ impl AuthHeader {
             ephemeral_pubkey,
             auth_response: resp,
         }
+    }
+
+    pub fn generate_response(sig: &[u8], updated_enr: Option<&Enr>) -> Vec<u8> {
+        // rlp encode the signature and ENR
+        let mut s = RlpStream::new();
+        if let Some(enr) = updated_enr {
+            s.begin_list(2);
+            s.append(&sig.to_vec());
+            s.append(enr);
+        } else {
+            s.append(&sig.to_vec());
+        }
+
+        s.drain()
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut s = RlpStream::new();
+        s.append(self);
+        s.drain()
     }
 }
 
