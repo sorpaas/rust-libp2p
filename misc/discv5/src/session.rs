@@ -1,18 +1,22 @@
-use super::packet::{AuthHeader, AuthTag, NodeId, Nonce, Packet, Tag, MAGIC_LENGTH, TAG_LENGTH};
+use super::packet::{AuthTag, NodeId, Nonce, Packet, Tag, MAGIC_LENGTH, TAG_LENGTH};
 use super::service::Discv5Service;
-use crate::handshake;
+use crate::crypto;
 use enr::{Enr, EnrBuilder};
 use futures::prelude::*;
 use libp2p_core::identity::Keypair;
 use log::{debug, error, warn};
-use openssl::symm::{encrypt_aead, Cipher};
-use rand;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::default::Default;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Minutes before the keys of an established connection timeout.
+//TODO: This is short for testing.
+const SESSION_TIMEOUT: u64 = 30;
+
+const REQUEST_TIMEOUT: u64 = 10;
 
 pub struct SessionService {
     /// The local ENR.
@@ -82,7 +86,7 @@ impl SessionService {
     }
 
     /// Calculates the src `NodeId` given a tag.
-    fn src_id(&self, tag: Tag) -> Tag {
+    fn src_id(&self, tag: &Tag) -> Tag {
         let hash = Sha256::digest(&self.node_id);
         let mut src_id: Tag = [0; TAG_LENGTH];
         for i in 0..TAG_LENGTH {
@@ -92,8 +96,8 @@ impl SessionService {
     }
 
     /// Calculates the tag given a `NodeId`.
-    fn tag(&self, dst_id: NodeId) -> Tag {
-        let hash = Sha256::digest(&dst_id);
+    fn tag(&self, dst_id: &NodeId) -> Tag {
+        let hash = Sha256::digest(dst_id);
         let mut tag: Tag = Default::default();
         for i in 0..TAG_LENGTH {
             tag[i] = hash[i] ^ self.node_id[i];
@@ -111,7 +115,7 @@ impl SessionService {
         enr_seq: u64,
     ) {
         // ignore, if the token doesn't match a pending request
-        let req = match self.pending_requests.get(&token) {
+        let req = match self.pending_requests.remove(&token) {
             Some(r) => r,
             None => {
                 debug!("WHOAREYOU packet received for an unknown request");
@@ -120,11 +124,13 @@ impl SessionService {
         };
 
         // drop the packet if the request didn't come from the expected src or node-id
-        if src != req.addr || src_id != req.enr.node_id() {
+        if src != req.dst || src_id != req.enr.node_id() {
             warn!(
                 "Invalid WHOAREYOU packet received from: {:?} ({:?})",
                 src, src_id
             );
+            // add the request back
+            self.pending_requests.insert(token, req);
             return;
         }
 
@@ -145,7 +151,7 @@ impl SessionService {
 
         // generate the session key for the node
         let (encryption_key, decryption_key, auth_resp_key, ephem_pubkey) =
-            match handshake::generate(&self.enr, &req.enr, &id_nonce) {
+            match crypto::derive_key(&self.enr, &req.enr, &id_nonce) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("Could not generate session key: {:?}", e);
@@ -162,8 +168,7 @@ impl SessionService {
         // encrypt the earliest message
         let earliest_message = messages.remove(0);
 
-        // auth response header
-        // sign the nonce (SHA256(nonce))
+        // sign the nonce
         let sig = match self.keypair.sign(&id_nonce) {
             Ok(v) => v,
             Err(e) => {
@@ -175,64 +180,80 @@ impl SessionService {
             }
         };
 
-        let auth_pt = AuthHeader::generate_response(&sig, updated_enr);
-        let mut mac: [u8; 16] = Default::default();
-        let mut ciphertext = match encrypt_aead(
-            Cipher::aes_128_gcm(),
+        // encrypt the earliest packet with the authentication header
+        let packet = match crypto::encrypt_with_header(
             &auth_resp_key,
-            Some(&[0u8; 12]),
-            &self.tag(src_id),
-            &auth_pt,
-            &mut mac,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Could not encrypt authentication header. Ignoring WHOAREYOU packet. Error: {:?}", e);
-                return;
-            }
-        };
-
-        // concat the ciphertext with the MAC
-        ciphertext.append(&mut mac.to_vec());
-
-        // generate random auth-tag
-        let auth_tag: [u8; 12] = rand::random();
-        // get the rlp_encoded auth_header
-        let auth_header = AuthHeader::new(auth_tag, ephem_pubkey, Box::new(ciphertext));
-
-        // encrypt the original message
-        let mut mac: [u8; 16] = Default::default();
-        let mut auth_data = self.tag(src_id).to_vec();
-        auth_data.append(&mut auth_header.encode());
-        let mut msg_cipher = match encrypt_aead(
-            Cipher::aes_128_gcm(),
             &encryption_key,
-            Some(&auth_tag),
-            &auth_data,
+            &sig,
             &earliest_message.encode(),
-            &mut mac,
+            ephem_pubkey,
+            updated_enr,
+            &self.tag(&src_id),
         ) {
             Ok(v) => v,
             Err(e) => {
-                error!("Could not encrypt authentication header message. Ignoring WHOAREYOUPacket. Error: {:?}", e);
+                error!("Could not encrypt message: {}", e);
                 return;
             }
-        };
-
-        // concat the ciphertext with the MAC
-        msg_cipher.append(&mut mac.to_vec());
-
-        let response = Packet::AuthMessage {
-            tag: self.tag(src_id),
-            auth_header,
-            message: Box::new(msg_cipher),
         };
 
         // send the response
+        self.service.send(src, packet);
 
-        // add the keys to database with timeout
+        // add the keys to memory with a timeout
+        let session = Session {
+            encryption_key,
+            decryption_key: decryption_key.clone(),
+            timeout: Instant::now() + Duration::from_secs(SESSION_TIMEOUT),
+        };
+        self.session_keys.insert(src_id.clone(), session);
 
         // flush the message cache
+        self.flush_messages(src, &src_id, &req.enr, &decryption_key);
+    }
+
+    // encrypts and sends any messages that were waiting for a session to be established
+    fn flush_messages(&mut self, src: SocketAddr, src_id: &NodeId, enr: &Enr, key: &[u8; 16]) {
+        let mut messages = match self.pending_messages.remove(src_id) {
+            Some(v) => v,
+            None => {
+                return;
+            }
+        };
+
+        let tag = self.tag(&src_id);
+        for _ in 0..messages.len() {
+            let msg = messages.pop().expect("item must exist");
+            let (msg_cipher, auth_tag) =
+                match crypto::encrypt_message(key, &msg.encode(), &tag, None) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!("Failed to encrypt message: {:?}, error: {}", msg, e);
+                        return;
+                    }
+                };
+            let packet = Packet::Message {
+                tag,
+                auth_tag,
+                message: Box::new(msg_cipher),
+            };
+            self.send_packet(src, enr, packet, &auth_tag);
+        }
+
+        debug_assert!(messages.is_empty());
+    }
+
+    // wrapper around service.send() that adds all sent messages to the pending_requests hashmap
+    fn send_packet(&mut self, src: SocketAddr, src_enr: &Enr, packet: Packet, auth_tag: &AuthTag) {
+        self.service.send(src, packet.clone());
+        let request = Request {
+            dst: src,
+            enr: src_enr.clone(),
+            packet,
+            timeout: Instant::now() + Duration::from_secs(REQUEST_TIMEOUT),
+        };
+
+        self.pending_requests.insert(auth_tag.clone(), request);
     }
 
     pub fn poll(&mut self) -> Async<Discv5Message> {
@@ -248,7 +269,7 @@ impl SessionService {
                             enr_seq,
                             ..
                         } => {
-                            let src_id = self.src_id(tag);
+                            let src_id = self.src_id(&tag);
                             self.handle_whoareyou(src, src_id, token, id_nonce, enr_seq);
                         }
                         Packet::AuthMessage {
@@ -256,7 +277,7 @@ impl SessionService {
                             auth_header,
                             message,
                         } => {
-                            let src_id = self.src_id(tag);
+                            let src_id = self.src_id(&tag);
                             //    self.handle_auth_message(src, src_id, auth_header, message);
                         }
                         Packet::Message {
@@ -264,7 +285,7 @@ impl SessionService {
                             auth_tag,
                             message,
                         } => {
-                            let src_id = self.src_id(tag);
+                            let src_id = self.src_id(&tag);
                             //TODO: Send this upwards for higher-level logic
                             //self.handle_message(src, src_id, auth_tag, message);
                         }
@@ -278,6 +299,7 @@ impl SessionService {
     }
 }
 
+#[derive(Debug)]
 pub struct Message {
     message_type: u8,
     message_data: Vec<u8>,
@@ -294,11 +316,12 @@ impl Message {
 
 pub struct Discv5Message;
 
+#[derive(Debug)]
 pub struct Request {
+    pub dst: SocketAddr,
     pub enr: Enr,
     pub packet: Packet,
     pub timeout: Instant,
-    pub addr: SocketAddr,
 }
 
 impl Request {
@@ -308,6 +331,7 @@ impl Request {
 }
 
 pub struct Session {
-    key: AuthTag,
-    expire: Instant,
+    encryption_key: [u8; 16],
+    decryption_key: [u8; 16],
+    timeout: Instant,
 }

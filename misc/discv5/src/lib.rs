@@ -6,7 +6,7 @@
 // mod behaviour;
 pub mod packet;
 
+mod crypto;
 mod error;
-mod handshake;
 mod service;
 pub mod session;

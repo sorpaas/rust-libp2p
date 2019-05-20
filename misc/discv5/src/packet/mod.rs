@@ -14,7 +14,7 @@ pub const NODE_ID_LENGTH: usize = 32;
 pub const TAG_LENGTH: usize = 32;
 const AUTH_TAG_LENGTH: usize = 12;
 pub const MAGIC_LENGTH: usize = 32;
-const ID_NONCE_LENGTH: usize = 12;
+pub const ID_NONCE_LENGTH: usize = 12;
 
 /// The authentication nonce (12 bytes).
 pub type AuthTag = [u8; AUTH_TAG_LENGTH];
