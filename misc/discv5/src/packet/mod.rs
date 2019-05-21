@@ -6,6 +6,7 @@
 mod auth_header;
 
 pub use auth_header::AuthHeader;
+pub use auth_header::AuthResponse;
 use log::debug;
 use rlp::Decodable;
 use std::default::Default;
@@ -329,7 +330,9 @@ mod tests {
 
         // auth header data
         let auth_tag: [u8; AUTH_TAG_LENGTH] = rand::random();
-        let ephemeral_pubkey = Keypair::generate_secp256k1().public();
+        let ephemeral_pubkey = Keypair::generate_secp256k1()
+            .public()
+            .into_protobuf_encoding();
         let auth_response: [u8; 32] = rand::random();
         let auth_response = Box::new(auth_response.to_vec());
 

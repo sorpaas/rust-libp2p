@@ -1,6 +1,11 @@
 #[derive(Debug)]
 pub enum Discv5Error {
     UnknownPublicKey,
-    PublicKeyNotSupported(&'static str),
+    KeyTypeNotSupported(&'static str),
     KeyDerivationFailed,
+    InvalidRemotePublicKey,
+    InvalidSecretKey,
+    EncryptionFail(String),
+    DecryptionFail(String),
+    Custom(String),
 }

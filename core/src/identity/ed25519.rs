@@ -20,12 +20,12 @@
 
 //! Ed25519 keys.
 
-use ed25519_dalek as ed25519;
-use failure::Fail;
 use super::error::DecodingError;
-use zeroize::Zeroize;
+use ed25519_dalek as ed25519;
 use ed25519_dalek::Digest;
+use failure::Fail;
 use typenum::U64;
+use zeroize::Zeroize;
 
 /// An Ed25519 keypair.
 pub struct Keypair(ed25519::Keypair);
@@ -47,7 +47,10 @@ impl Keypair {
     /// zeroing the input on success.
     pub fn decode(kp: &mut [u8]) -> Result<Keypair, DecodingError> {
         ed25519::Keypair::from_bytes(kp)
-            .map(|k| { kp.zeroize(); Keypair(k) })
+            .map(|k| {
+                kp.zeroize();
+                Keypair(k)
+            })
             .map_err(|e| DecodingError::new("Ed25519 keypair", e.compat()))
     }
 
@@ -59,9 +62,13 @@ impl Keypair {
     /// Sign a 512 bit message using the private key of this keypair. The optional `context` is concatenated
     /// into the hash which is then signed to produce application-specific signatures.
     pub fn sign_prehashed<D>(&self, prehashed_msg: D, context: Option<&'static [u8]>) -> Vec<u8>
-        where D: Digest<OutputSize = U64>
+    where
+        D: Digest<OutputSize = U64>,
     {
-        self.0.sign_prehashed(prehashed_msg, context).to_bytes().to_vec()
+        self.0
+            .sign_prehashed(prehashed_msg, context)
+            .to_bytes()
+            .to_vec()
     }
 
     /// Get the public key of this keypair.
@@ -80,7 +87,8 @@ impl Clone for Keypair {
     fn clone(&self) -> Keypair {
         let mut sk_bytes = self.0.secret.to_bytes();
         let secret = SecretKey::from_bytes(&mut sk_bytes)
-            .expect("ed25519::SecretKey::from_bytes(to_bytes(k)) != k").0;
+            .expect("ed25519::SecretKey::from_bytes(to_bytes(k)) != k")
+            .0;
         let public = ed25519::PublicKey::from_bytes(&self.0.public.to_bytes())
             .expect("ed25519::PublicKey::from_bytes(to_bytes(k)) != k");
         Keypair(ed25519::Keypair { secret, public })
@@ -110,14 +118,19 @@ pub struct PublicKey(ed25519::PublicKey);
 impl PublicKey {
     /// Verify the Ed25519 signature on a message using the public key.
     pub fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
-        ed25519::Signature::from_bytes(sig).map(|s| self.0.verify(msg, &s)).is_ok()
+        ed25519::Signature::from_bytes(sig)
+            .map(|s| self.0.verify(msg, &s))
+            .is_ok()
     }
 
     /// Verify the Ed25519 signature on a pre-hashed message with an optional context using the public key.
-    pub fn verify_prehashed<D>(&self, prehashed_msg: D, context: Option<&[u8]>, sig: &[u8]) -> bool 
-        where D: Digest<OutputSize = U64>
+    pub fn verify_prehashed<D>(&self, prehashed_msg: D, context: Option<&[u8]>, sig: &[u8]) -> bool
+    where
+        D: Digest<OutputSize = U64>,
     {
-        ed25519::Signature::from_bytes(sig).map(|s| self.0.verify_prehashed(prehashed_msg, context, &s)).is_ok()
+        ed25519::Signature::from_bytes(sig)
+            .map(|s| self.0.verify_prehashed(prehashed_msg, context, &s))
+            .is_ok()
     }
 
     /// Encode the public key into a byte array in compressed form, i.e.
@@ -147,8 +160,7 @@ impl AsRef<[u8]> for SecretKey {
 impl Clone for SecretKey {
     fn clone(&self) -> SecretKey {
         let mut sk_bytes = self.0.to_bytes();
-        Self::from_bytes(&mut sk_bytes)
-            .expect("ed25519::SecretKey::from_bytes(to_bytes(k)) != k")
+        Self::from_bytes(&mut sk_bytes).expect("ed25519::SecretKey::from_bytes(to_bytes(k)) != k")
     }
 }
 
@@ -176,9 +188,7 @@ mod tests {
     use quickcheck::*;
 
     fn eq_keypairs(kp1: &Keypair, kp2: &Keypair) -> bool {
-        kp1.public() == kp2.public()
-            &&
-        kp1.0.secret.as_bytes() == kp2.0.secret.as_bytes()
+        kp1.public() == kp2.public() && kp1.0.secret.as_bytes() == kp2.0.secret.as_bytes()
     }
 
     #[test]
@@ -187,9 +197,7 @@ mod tests {
             let kp1 = Keypair::generate();
             let mut kp1_enc = kp1.encode();
             let kp2 = Keypair::decode(&mut kp1_enc).unwrap();
-            eq_keypairs(&kp1, &kp2)
-                &&
-            kp1_enc.iter().all(|b| *b == 0)
+            eq_keypairs(&kp1, &kp2) && kp1_enc.iter().all(|b| *b == 0)
         }
         QuickCheck::new().tests(10).quickcheck(prop as fn() -> _);
     }
@@ -200,11 +208,8 @@ mod tests {
             let kp1 = Keypair::generate();
             let mut sk = kp1.0.secret.to_bytes();
             let kp2 = Keypair::from(SecretKey::from_bytes(&mut sk).unwrap());
-            eq_keypairs(&kp1, &kp2)
-                &&
-            sk == [0u8; 32]
+            eq_keypairs(&kp1, &kp2) && sk == [0u8; 32]
         }
         QuickCheck::new().tests(10).quickcheck(prop as fn() -> _);
     }
 }
-
