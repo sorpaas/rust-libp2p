@@ -67,7 +67,7 @@ pub enum Packet {
 
 impl Packet {
     /// Encodes a packet to bytes.
-    pub fn encode(self) -> Vec<u8> {
+    pub fn encode(&self) -> Vec<u8> {
         match self {
             Packet::RandomPacket {
                 tag,
@@ -75,7 +75,7 @@ impl Packet {
                 data,
             } => {
                 let mut buf = Vec::with_capacity(TAG_LENGTH + AUTH_TAG_LENGTH + 1 + 44); // at least 44 random bytes
-                buf.extend_from_slice(&tag);
+                buf.extend_from_slice(tag);
                 buf.extend_from_slice(&rlp::encode(&auth_tag.to_vec()));
                 buf.extend_from_slice(&data);
                 buf
@@ -90,8 +90,8 @@ impl Packet {
                 let mut buf = Vec::with_capacity(
                     TAG_LENGTH + MAGIC_LENGTH + AUTH_TAG_LENGTH + ID_NONCE_LENGTH + 8 + 2,
                 ); // + enr + rlp
-                buf.extend_from_slice(&tag);
-                buf.extend_from_slice(&magic);
+                buf.extend_from_slice(tag);
+                buf.extend_from_slice(magic);
                 let list = rlp::encode_list::<Vec<u8>, Vec<u8>>(&[
                     token.to_vec(),
                     id_nonce.to_vec(),
@@ -106,8 +106,8 @@ impl Packet {
                 message,
             } => {
                 let mut buf = Vec::with_capacity(TAG_LENGTH + 60); // TODO: Estimate correctly
-                buf.extend_from_slice(&tag);
-                buf.extend_from_slice(&rlp::encode(&auth_header));
+                buf.extend_from_slice(tag);
+                buf.extend_from_slice(&rlp::encode(auth_header));
                 buf.extend_from_slice(&message.to_vec());
                 buf
             }
@@ -117,7 +117,7 @@ impl Packet {
                 message,
             } => {
                 let mut buf = Vec::with_capacity(TAG_LENGTH + AUTH_TAG_LENGTH + 1 + 24);
-                buf.extend_from_slice(&tag);
+                buf.extend_from_slice(tag);
                 buf.extend_from_slice(&rlp::encode(&auth_tag.to_vec()));
                 buf.extend_from_slice(&message.to_vec());
                 buf

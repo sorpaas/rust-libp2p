@@ -5,16 +5,19 @@ use super::service::Discv5Service;
 use crate::crypto;
 use enr::{Enr, EnrBuilder};
 use futures::prelude::*;
+use hex;
 use libp2p_core::identity::Keypair;
 use log::{debug, error, warn};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::default::Default;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-/// Minutes before the keys of an established connection timeout.
+mod tests;
+
+/// Seconds before the keys of an established connection timeout.
 //TODO: This is short for testing.
 const SESSION_TIMEOUT: u64 = 30;
 
@@ -25,7 +28,7 @@ const REQUEST_RETRIES: u8 = 2;
 
 pub struct SessionService {
     /// Queue of events produced by the session service.
-    events: Vec<SessionMessage>,
+    events: VecDeque<SessionMessage>,
     /// The local ENR.
     enr: Enr,
     /// The keypair to sign the ENR and set up encrypted communication with peers.
@@ -84,7 +87,7 @@ impl SessionService {
         };
 
         Ok(SessionService {
-            events: Vec::new(),
+            events: VecDeque::new(),
             enr,
             keypair,
             node_id,
@@ -141,6 +144,8 @@ impl SessionService {
             warn!("Incorrect WHOAREYOU packet source");
             return;
         }
+
+        debug!("Received a WHOAREYOU packet from: {}", hex::encode(src_id));
 
         // get the messages that are waiting for an established session
         let messages = match self.pending_messages.get_mut(&src_id) {
@@ -210,13 +215,14 @@ impl SessionService {
 
         // send the response
         debug!(
-            "Sending Authentication response to node: {:?} at: {:?}",
-            src_id, src
+            "Sending Authentication response to node: {} at: {:?}",
+            hex::encode(src_id),
+            src
         );
         self.service.send(src, packet);
 
         // add the keys to memory with a timeout
-        debug!("Session established with node: {:?}", src_id);
+        debug!("Session established with node: {}", hex::encode(src_id));
         let session = Session {
             encryption_key,
             decryption_key: decryption_key.clone(),
@@ -240,6 +246,10 @@ impl SessionService {
         // lead to future outgoing WHOAREYOU packets if they proceed to send further encrypted
         // packets.
         let src_id = self.src_id(&tag);
+        debug!(
+            "Received an Authentication header message from: {}",
+            hex::encode(src_id)
+        );
         let req = self.whoareyou_requests.remove(&src_id);
 
         if req.is_none() {
@@ -264,12 +274,12 @@ impl SessionService {
         };
 
         // obtain the session keys
-        let (decryption_key, encryption_key, auth_resp_key) = match crypto::derive_keys_from_header(
+        let (decryption_key, encryption_key, auth_resp_key) = match crypto::derive_keys_from_pubkey(
             &self.keypair,
             &self.node_id,
             &req.node_id,
             &id_nonce,
-            &auth_header,
+            &auth_header.ephemeral_pubkey,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -295,7 +305,8 @@ impl SessionService {
 
         // add an event if we have an updated enr
         if let Some(enr) = updated_enr {
-            self.events.push(SessionMessage::UpdatedEnr(Box::new(enr)));
+            self.events
+                .push_back(SessionMessage::UpdatedEnr(Box::new(enr)));
         }
 
         // update the session keys
@@ -335,8 +346,8 @@ impl SessionService {
                 // check for pending WHOAREYOU request
                 if !self.whoareyou_requests.get(&dst_id).is_some() {
                     debug!(
-                        "No session established, sending a random packet to: {:?}",
-                        dst_id
+                        "No session established, sending a random packet to: {}",
+                        hex::encode(dst_id)
                     );
                     // need to establish a new session, send a random packet
                     let random_data = (0..44).map(|_| rand::random::<u8>()).collect();
@@ -383,6 +394,7 @@ impl SessionService {
     /// highest known ENR then calls this function to send a WHOAREYOU packet.
     pub fn send_whoareyou(&mut self, dst: SocketAddr, dst_enr: &Enr, auth_tag: AuthTag) {
         let dst_id = dst_enr.node_id();
+        debug!("Sending WHOAREYOU packet to: {}", hex::encode(dst_id));
 
         let magic = {
             let mut hasher = Sha256::new();
@@ -420,17 +432,20 @@ impl SessionService {
             None => {
                 // no session exists
                 // check if we are awaiting an auth packet
+                debug!("Received a message without a session.");
                 if self.whoareyou_requests.get(&src_id).is_some() {
-                    // potentially store and decrypt once we receive the packet.
-                    // drop it for now.
+                    debug!("Waiting for a session to be generated.");
+                // potentially store and decrypt once we receive the packet.
+                // drop it for now.
                 } else {
+                    debug!("Requesting a WHOAREYOU packet to be sent");
                     // spawn a WHOAREYOU event to check for highest known ENR
                     let event = SessionMessage::WhoAreYouRequest {
                         src,
                         src_id: src_id.clone(),
                         auth_tag,
                     };
-                    self.events.push(event);
+                    self.events.push_back(event);
                 }
                 return;
             }
@@ -439,22 +454,23 @@ impl SessionService {
         // we have a known session, decrypt and process the message
         let message = match crypto::decrypt_message(&session.decryption_key, auth_tag, message, aad)
         {
-            Ok(m) => Message::decode(message.to_vec()), // TODO: Build message struct
+            Ok(m) => Message::decode(m), // TODO: Build message struct
             Err(e) => {
-                debug!("Message from node: {:?} in not encrypted with known session keys. Requesting WHOAREYOU packet. Error: {:?}", src_id, e);
+                debug!("Message from node: {:?} in not encrypted with known session keys. Requesting WHOAREYOU packet. Error: {:?}", hex::encode(src_id), e);
                 // spawn a WHOAREYOU event to check for highest known ENR
                 let event = SessionMessage::WhoAreYouRequest {
                     src,
                     src_id: src_id.clone(),
                     auth_tag,
                 };
-                self.events.push(event);
+                self.events.push_back(event);
                 return;
             }
         };
 
         // we have received a new message. Notify the protocol.
-        self.events.push(SessionMessage::Message(Box::new(message)));
+        self.events
+            .push_back(SessionMessage::Message(Box::new(message)));
     }
 
     // encrypts and sends any messages that were waiting for a session to be established
@@ -545,7 +561,7 @@ impl SessionService {
         };
     }
 
-    pub fn poll(&mut self) -> Async<Discv5Message> {
+    pub fn poll(&mut self) -> Async<SessionMessage> {
         // poll the discv5 service
         loop {
             match self.service.poll() {
@@ -582,11 +598,19 @@ impl SessionService {
                 Async::NotReady => break,
             }
         }
+
+        // process any events if necessary
+        if let Some(event) = self.events.pop_front() {
+            return Async::Ready(event);
+        }
+
+        // check for timeouts
+
         Async::NotReady
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     message_type: u8,
     message_data: Vec<u8>,

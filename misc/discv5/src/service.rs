@@ -43,9 +43,25 @@ impl Discv5Service {
     }
 
     pub fn poll(&mut self) -> Async<(SocketAddr, Packet)> {
-        // query
+        // send messages
+        while !self.send_queue.is_empty() {
+            let (dst, packet) = self.send_queue.remove(0);
 
-        // send
+            match self.socket.poll_send_to(&packet.encode(), &dst) {
+                Ok(Async::Ready(bytes_written)) => {
+                    debug_assert_eq!(bytes_written, packet.encode().len());
+                }
+                Ok(Async::NotReady) => {
+                    // didn't write add back and break
+                    self.send_queue.insert(0, (dst, packet));
+                    break;
+                }
+                Err(_) => {
+                    self.send_queue.clear();
+                    break;
+                }
+            }
+        }
 
         // handle incoming messages
         loop {

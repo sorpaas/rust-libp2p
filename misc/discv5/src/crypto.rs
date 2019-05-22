@@ -90,7 +90,7 @@ fn derive_key(
 ) -> Result<(Key, Key, Key), Discv5Error> {
     let mut info = [0u8; INFO_LENGTH];
     info[0..26].copy_from_slice(b"discovery v5 key agreement");
-    info[26..NODE_ID_LENGTH].copy_from_slice(first_id);
+    info[26..26 + NODE_ID_LENGTH].copy_from_slice(first_id);
     info[26 + NODE_ID_LENGTH..].copy_from_slice(second_id);
 
     let hk = Hkdf::<Sha256>::extract(Some(secret), id_nonce);
@@ -109,14 +109,13 @@ fn derive_key(
     Ok((initiator_key, responder_key, auth_resp_key))
 }
 
-/// Derives the session keys and verifies the signature of the `id_nonce` from an Authentication header that was built for the keypair given
-/// (local_keypair). This returns the session keys and potentially an updated ENR.
-pub fn derive_keys_from_header(
+/// Derives the session keys for a public key type that matches the local keypair.
+pub fn derive_keys_from_pubkey(
     local_keypair: &Keypair,
     local_id: &NodeId,
     remote_id: &NodeId,
     id_nonce: &Nonce,
-    header: &AuthHeader,
+    ephem_pubkey: &[u8],
 ) -> Result<(Key, Key, Key), Discv5Error> {
     let secret = match local_keypair {
         Keypair::Rsa(_) => {
@@ -130,7 +129,7 @@ pub fn derive_keys_from_header(
         Keypair::Secp256k1(key) => {
             // convert remote pubkey into secp256k1 public key
             // the key type should match our own node record
-            let remote_pubkey = secp256k1::key::PublicKey::from_slice(&header.ephemeral_pubkey)
+            let remote_pubkey = secp256k1::key::PublicKey::from_slice(ephem_pubkey)
                 .map_err(|_| Discv5Error::InvalidRemotePublicKey)?;
 
             // convert our secret key into a secp256k1 secret key
@@ -206,7 +205,7 @@ pub fn decrypt_message(
         &message[..message.len() - 16],
         &mac,
     )
-    .map_err(|e| Discv5Error::DecryptionFail(format!("Could not encrypt message. Error: {:?}", e)))
+    .map_err(|e| Discv5Error::DecryptionFail(format!("Could not decrypt message. Error: {:?}", e)))
 }
 
 pub fn encrypt_with_header(
@@ -250,7 +249,7 @@ pub fn encrypt_message(
     let mut msg_cipher = encrypt_aead(
         Cipher::aes_128_gcm(),
         key,
-        Some(&nonce.expect("must have a value")),
+        Some(&nonce.expect("has a value")),
         aad,
         message,
         &mut mac,
@@ -259,5 +258,54 @@ pub fn encrypt_message(
 
     // concat the ciphertext with the MAC
     msg_cipher.append(&mut mac.to_vec());
-    Ok((msg_cipher, nonce.expect("must have a value")))
+    Ok((msg_cipher, nonce.expect("has a value")))
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use enr::EnrBuilder;
+    use libp2p_core::identity::Keypair;
+    use rand;
+
+    #[test]
+    fn derive_symmetric_keys() {
+        let node1_kp = Keypair::generate_secp256k1();
+        let node2_kp = Keypair::generate_secp256k1();
+
+        let node1_enr = EnrBuilder::new().build(&node1_kp).unwrap();
+        let node2_enr = EnrBuilder::new().build(&node2_kp).unwrap();
+
+        let nonce: Nonce = rand::random();
+
+        let (key1, key2, key3, pk) =
+            generate_session_keys(&node1_enr.node_id(), &node2_enr, &nonce).unwrap();
+        let (key4, key5, key6) = derive_keys_from_pubkey(
+            &node2_kp,
+            &node2_enr.node_id(),
+            &node1_enr.node_id(),
+            &nonce,
+            &pk,
+        )
+        .unwrap();
+
+        assert_eq!(key1, key4);
+        assert_eq!(key2, key5);
+        assert_eq!(key3, key6);
+    }
+
+    #[test]
+    fn encrypt_decrypt() {
+        let tag: AuthTag = rand::random();
+        let msg: Vec<u8> = vec![1, 2, 3, 4, 5, 6];
+        let key: Key = rand::random();
+
+        let (cipher, auth_tag) = encrypt_message(&key, None, &msg, &tag).unwrap();
+
+        let plain_text = decrypt_message(&key, auth_tag, &cipher, &tag).unwrap();
+
+        assert_eq!(plain_text, msg);
+    }
+
 }
