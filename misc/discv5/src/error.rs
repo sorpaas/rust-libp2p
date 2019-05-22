@@ -5,7 +5,8 @@ pub enum Discv5Error {
     KeyDerivationFailed,
     InvalidRemotePublicKey,
     InvalidSecretKey,
+    InvalidSignature,
     EncryptionFail(String),
     DecryptionFail(String),
-    Custom(String),
+    Custom(&'static str),
 }

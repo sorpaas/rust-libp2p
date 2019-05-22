@@ -10,7 +10,7 @@ use log::debug;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use libp2p_core::identity::rsa;
 use libp2p_core::identity::secp256k1 as libp2p_secp256k1;
@@ -162,6 +162,18 @@ impl Enr {
         None
     }
 
+    /// Returns the SocketAddr of the ENR if an IP and port are defined.
+    pub fn socket(&self) -> Option<SocketAddr> {
+        if let Some(ip) = self.ip() {
+            if let Some(tcp) = self.tcp() {
+                return Some(SocketAddr::new(ip, tcp));
+            } else if let Some(udp) = self.udp() {
+                return Some(SocketAddr::new(ip, udp));
+            }
+        }
+        None
+    }
+
     pub fn signature(&self) -> &[u8] {
         &self.signature
     }
@@ -193,6 +205,21 @@ impl Enr {
             return enr_pubkey.verify(&self.rlp_content, &self.signature);
         }
         false
+    }
+}
+
+impl std::fmt::Display for Enr {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "Enr: Id: {:?}, seq: {}, ip: {:?}, tcp: {:?}, udp: {:?}, public key: {:?}",
+            self.node_id(),
+            self.seq,
+            self.ip(),
+            self.tcp(),
+            self.udp(),
+            self.pubkey(),
+        )
     }
 }
 

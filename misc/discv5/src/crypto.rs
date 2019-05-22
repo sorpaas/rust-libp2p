@@ -6,7 +6,9 @@
 /// encryption and key-derivation algorithms. Future versions may abstract some of these to allow
 /// of different algorithms.
 use crate::error::Discv5Error;
-use crate::packet::{AuthHeader, AuthTag, NodeId, Nonce, Packet, Tag, NODE_ID_LENGTH};
+use crate::packet::{
+    AuthHeader, AuthResponse, AuthTag, NodeId, Nonce, Packet, Tag, NODE_ID_LENGTH,
+};
 use enr::Enr;
 use hkdf::Hkdf;
 use lazy_static::lazy_static;
@@ -114,7 +116,7 @@ pub fn derive_keys_from_header(
     local_id: &NodeId,
     remote_id: &NodeId,
     id_nonce: &Nonce,
-    header: AuthHeader,
+    header: &AuthHeader,
 ) -> Result<(Key, Key, Key), Discv5Error> {
     let secret = match local_keypair {
         Keypair::Rsa(_) => {
@@ -143,32 +145,49 @@ pub fn derive_keys_from_header(
     derive_key(&secret, remote_id, local_id, id_nonce)
 }
 
-/*
+pub fn generate_nonce(id_nonce: Nonce) -> Vec<u8> {
+    let mut nonce = b"discovery-id-nonce".to_vec();
+    nonce.append(&mut id_nonce.to_vec());
+    nonce
+}
+
+/// Verifies the encoding and nonce signature given in the authentication header. If
+/// the header contains an updated ENR, it is returned.
+#[inline]
 pub fn verify_authentication_header(
     auth_resp_key: &Key,
+    id_nonce: Nonce,
+    header: &AuthHeader,
+    tag: &Tag,
     remote_enr: &Enr,
-    header: AuthHeader,
-) -> Result<(), Discv5Error> {
+) -> Result<Option<Enr>, Discv5Error> {
     if header.auth_scheme_name != "gsm" {
         return Err(Discv5Error::Custom("Invalid authentication scheme".into()));
     }
 
     // decrypt the auth-response
-    let rlp_ath_response = decrypt_message(auth_resp_key, header.auth_response, [0u8; 12])?;
+    let rlp_auth_response = decrypt_message(auth_resp_key, [0u8; 12], &header.auth_response, tag)?;
+    let auth_response = rlp::decode::<AuthResponse>(&rlp_auth_response)
+        .map_err(|_| Discv5Error::Custom("Invalid auth response format"))?;
 
+    // verify the nonce signature
+    let remote_pubkey = remote_enr
+        .pubkey()
+        .ok_or_else(|| Discv5Error::InvalidRemotePublicKey)?;
+    let nonce = generate_nonce(id_nonce);
+    if !remote_pubkey.verify(&nonce, &auth_response.signature) {
+        return Err(Discv5Error::InvalidSignature);
+    }
 
-
-
-
+    Ok(auth_response.updated_enr)
 }
-*/
 
 /// Decrypt messages that are post-fixed with an authenticated MAC.
 pub fn decrypt_message(
     key: &Key,
+    nonce: AuthTag,
     message: &[u8],
     aad: &[u8],
-    nonce: AuthTag,
 ) -> Result<Vec<u8>, Discv5Error> {
     if message.len() < 16 {
         return Err(Discv5Error::DecryptionFail(
@@ -193,12 +212,12 @@ pub fn decrypt_message(
 pub fn encrypt_with_header(
     auth_resp_key: &Key,
     encryption_key: &Key,
-    message: &[u8],
     auth_pt: &[u8],
+    message: &[u8],
     ephem_pubkey: &[u8],
     tag: &Tag,
 ) -> Result<Packet, Discv5Error> {
-    let (ciphertext, _) = encrypt_message(auth_resp_key, auth_pt, tag, Some([0u8; 12]))?;
+    let (ciphertext, _) = encrypt_message(auth_resp_key, Some([0u8; 12]), auth_pt, tag)?;
 
     // get the rlp_encoded auth_header
     let auth_tag: [u8; 12] = rand::random();
@@ -207,7 +226,7 @@ pub fn encrypt_with_header(
     let mut auth_data = tag.to_vec();
     auth_data.append(&mut auth_header.encode());
 
-    let (message, _) = encrypt_message(encryption_key, message, &auth_data, Some(auth_tag))?;
+    let (message, _) = encrypt_message(encryption_key, Some(auth_tag), message, &auth_data)?;
 
     Ok(Packet::AuthMessage {
         tag: tag.clone(),
@@ -218,9 +237,9 @@ pub fn encrypt_with_header(
 
 pub fn encrypt_message(
     key: &Key,
+    mut nonce: Option<AuthTag>,
     message: &[u8],
     aad: &[u8],
-    mut nonce: Option<AuthTag>,
 ) -> Result<(Vec<u8>, AuthTag), Discv5Error> {
     if nonce.is_none() {
         nonce = Some(rand::random());

@@ -20,7 +20,12 @@ const SESSION_TIMEOUT: u64 = 30;
 
 const REQUEST_TIMEOUT: u64 = 10;
 
+//TODO: Implement this
+const REQUEST_RETRIES: u8 = 2;
+
 pub struct SessionService {
+    /// Queue of events produced by the session service.
+    events: Vec<SessionMessage>,
     /// The local ENR.
     enr: Enr,
     /// The keypair to sign the ENR and set up encrypted communication with peers.
@@ -73,12 +78,13 @@ impl SessionService {
             let mut hasher = Sha256::new();
             hasher.input(node_id);
             hasher.input(b"WHOAREYOU");
-            let mut magic: [u8; MAGIC_LENGTH] = [0; MAGIC_LENGTH];
+            let mut magic = [0u8; MAGIC_LENGTH];
             magic.copy_from_slice(&hasher.result());
             magic
         };
 
         Ok(SessionService {
+            events: Vec::new(),
             enr,
             keypair,
             node_id,
@@ -110,29 +116,6 @@ impl SessionService {
         tag
     }
 
-    // verify that a received packet came from a pending request with the correct source
-    #[inline]
-    fn verify_packet(
-        &mut self,
-        src: SocketAddr,
-        src_id: &NodeId,
-        auth_tag: &AuthTag,
-    ) -> Result<Request, String> {
-        // the auth-tag must match a pending request
-        let req = self
-            .pending_requests
-            .remove(auth_tag)
-            .ok_or_else(|| String::from("Packet references an unknown or expired request"))?;
-
-        // the referenced request must come from the expected src or node-id
-        if src != req.dst || src_id != &req.node_id {
-            // add the request back
-            self.pending_requests.insert(auth_tag.clone(), req);
-            return Err(String::from("Incorrect source"));
-        }
-        Ok(req)
-    }
-
     /// Handles a WHOAREYOU packet that was received from the network.
     fn handle_whoareyou(
         &mut self,
@@ -142,19 +125,25 @@ impl SessionService {
         id_nonce: Nonce,
         enr_seq: u64,
     ) {
-        let req = match self.verify_packet(src, &src_id, &token) {
-            Ok(v) => v,
-            Err(e) => {
-                debug!(
-                    "WHOAREYOU packet verification failed: src: {:?}, error: {}",
-                    src_id, e
-                );
+        // the auth-tag must match a pending request
+        let req = match self.pending_requests.remove(&token) {
+            Some(v) => v,
+            None => {
+                debug!("Received a WHOAREYOU packet that references an unknown or expired request");
                 return;
             }
         };
 
+        // the referenced request must come from the expected src or node-id
+        if src != req.dst || src_id != req.node_id {
+            // add the request back
+            self.pending_requests.insert(token, req);
+            warn!("Incorrect WHOAREYOU packet source");
+            return;
+        }
+
         // get the messages that are waiting for an established session
-        let mut messages = match self.pending_messages.get_mut(&src_id) {
+        let messages = match self.pending_messages.get_mut(&src_id) {
             Some(v) => v,
             None => {
                 // this should not happen
@@ -164,7 +153,7 @@ impl SessionService {
         };
 
         if messages.is_empty() {
-            error!("No pending messages found for WHOAREYOU request.");
+            debug!("No pending messages found for WHOAREYOU request.");
             return;
         }
 
@@ -188,8 +177,7 @@ impl SessionService {
         let earliest_message = messages.remove(0);
 
         // sign the nonce
-        let mut nonce = b"discovery-id-nonce".to_vec();
-        nonce.append(&mut id_nonce.to_vec());
+        let nonce = crypto::generate_nonce(id_nonce);
         let sig = match self.keypair.sign(&nonce) {
             Ok(v) => v,
             Err(e) => {
@@ -221,9 +209,14 @@ impl SessionService {
         };
 
         // send the response
+        debug!(
+            "Sending Authentication response to node: {:?} at: {:?}",
+            src_id, src
+        );
         self.service.send(src, packet);
 
         // add the keys to memory with a timeout
+        debug!("Session established with node: {:?}", src_id);
         let session = Session {
             encryption_key,
             decryption_key: decryption_key.clone(),
@@ -239,14 +232,15 @@ impl SessionService {
     fn handle_auth_message(
         &mut self,
         src: SocketAddr,
-        src_id: &NodeId,
+        tag: Tag,
         auth_header: AuthHeader,
         message: &[u8],
     ) {
         // Needs to match an outgoing WHOAREYOU packet (so we have the required nonce to be signed). If it doesn't we drop the packet. This will
         // lead to future outgoing WHOAREYOU packets if they proceed to send further encrypted
         // packets.
-        let req = self.whoareyou_requests.remove(src_id);
+        let src_id = self.src_id(&tag);
+        let req = self.whoareyou_requests.remove(&src_id);
 
         if req.is_none() {
             warn!("Received an authenticated header without a known WHOAREYOU packet. Dropping");
@@ -256,7 +250,7 @@ impl SessionService {
 
         // verify the source ip, avoid spam and signature verification calculations from malicious packets.
         // the referenced request must come from the expected src or node-id
-        if src != req.dst || src_id != &req.node_id {
+        if src != req.dst || src_id != req.node_id {
             warn!("Received an authenticated header from incorrect source. Expected id: {:?}, actual id: {:?}, expected source: {:?} actual source: {:?}", req.node_id, src_id, req.dst, src);
             // add the request back
             self.whoareyou_requests.insert(src_id.clone(), req);
@@ -265,8 +259,8 @@ impl SessionService {
 
         // get the nonce
         let id_nonce = match req.packet {
-            _ => unreachable!("Coding error if there is not a WHOAREYOU packet in this request"),
             Packet::WhoAreYou { id_nonce, .. } => id_nonce,
+            _ => unreachable!("Coding error if there is not a WHOAREYOU packet in this request"),
         };
 
         // obtain the session keys
@@ -275,7 +269,7 @@ impl SessionService {
             &self.node_id,
             &req.node_id,
             &id_nonce,
-            auth_header,
+            &auth_header,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -285,23 +279,200 @@ impl SessionService {
         };
 
         // verify the authentication header
+        let updated_enr = match crypto::verify_authentication_header(
+            &auth_resp_key,
+            id_nonce,
+            &auth_header,
+            &self.tag(&src_id),
+            &req.enr,
+        ) {
+            Ok(enr) => enr,
+            Err(e) => {
+                warn!("Invalid authentication header: {:?}", e);
+                return;
+            }
+        };
+
+        // add an event if we have an updated enr
+        if let Some(enr) = updated_enr {
+            self.events.push(SessionMessage::UpdatedEnr(Box::new(enr)));
+        }
+
+        // update the session keys
+        let session = Session {
+            encryption_key,
+            decryption_key,
+            timeout: Instant::now() + Duration::from_secs(SESSION_TIMEOUT),
+        };
+        self.session_keys.insert(src_id.clone(), session);
+
+        // decrypt the message
+        let mut aad = tag.to_vec();
+        aad.append(&mut auth_header.encode());
+        self.handle_message(src, src_id, auth_header.auth_tag, message, &aad);
+
+        // flush messages awaiting a session
+        self.flush_messages(src, &src_id, &req.enr, &encryption_key);
+    }
+
+    /// Sends a message to a node given the nodes ENR. This function will handle establishing a
+    /// session and retrying requests on timeout.
+    pub fn send_message(&mut self, dst_enr: &Enr, message: Message) {
+        // check for an established session
+        let dst_id = dst_enr.node_id();
+
+        let dst = match dst_enr.socket() {
+            Some(s) => s,
+            None => {
+                warn!("Could not send message. ENR has no ip/port: {}", dst_enr);
+                return;
+            }
+        };
+
+        let session = match self.session_keys.get(&dst_id) {
+            Some(s) => s,
+            None => {
+                // check for pending WHOAREYOU request
+                if !self.whoareyou_requests.get(&dst_id).is_some() {
+                    debug!(
+                        "No session established, sending a random packet to: {:?}",
+                        dst_id
+                    );
+                    // need to establish a new session, send a random packet
+                    let random_data = (0..44).map(|_| rand::random::<u8>()).collect();
+                    let auth_tag: AuthTag = rand::random();
+                    let packet = Packet::RandomPacket {
+                        tag: self.tag(&dst_id),
+                        auth_tag: auth_tag.clone(),
+                        data: Box::new(random_data),
+                    };
+                    self.send_packet(dst, dst_enr, packet, Some(&auth_tag));
+                }
+                // we are currently establishing a connection, add to pending messages
+                debug!("Awaiting a session to established, caching message");
+                let msgs = self
+                    .pending_messages
+                    .entry(dst_id)
+                    .or_insert_with(|| Vec::new());
+                msgs.push(message);
+                return;
+            }
+        };
+
+        // session is established, encrypt the message and send
+        let tag = self.tag(&dst_id);
+        let (cipher, auth_tag) =
+            match crypto::encrypt_message(&session.encryption_key, None, &message.encode(), &tag) {
+                Ok(c) => c,
+                Err(_) => {
+                    error!("Failed to encrypt message");
+                    return;
+                }
+            };
+
+        let packet = Packet::Message {
+            tag,
+            auth_tag,
+            message: Box::new(cipher),
+        };
+
+        self.send_packet(dst, dst_enr, packet, Some(&auth_tag));
+    }
+
+    /// This is called in response to a SessionMessage::WhoAreYou event. The protocol finds the
+    /// highest known ENR then calls this function to send a WHOAREYOU packet.
+    pub fn send_whoareyou(&mut self, dst: SocketAddr, dst_enr: &Enr, auth_tag: AuthTag) {
+        let dst_id = dst_enr.node_id();
+
+        let magic = {
+            let mut hasher = Sha256::new();
+            hasher.input(dst_id);
+            hasher.input(b"WHOAREYOU");
+            let mut magic = [0u8; MAGIC_LENGTH];
+            magic.copy_from_slice(&hasher.result());
+            magic
+        };
+
+        let id_nonce: Nonce = rand::random();
+
+        let packet = Packet::WhoAreYou {
+            tag: self.tag(&dst_id),
+            magic,
+            token: auth_tag,
+            id_nonce,
+            enr_seq: dst_enr.seq,
+        };
+
+        self.send_packet(dst, dst_enr, packet, None);
+    }
+
+    fn handle_message(
+        &mut self,
+        src: SocketAddr,
+        src_id: NodeId,
+        auth_tag: AuthTag,
+        message: &[u8],
+        aad: &[u8],
+    ) {
+        // check if we have an established session
+        let session = match self.session_keys.get(&src_id) {
+            Some(session) => session,
+            None => {
+                // no session exists
+                // check if we are awaiting an auth packet
+                if self.whoareyou_requests.get(&src_id).is_some() {
+                    // potentially store and decrypt once we receive the packet.
+                    // drop it for now.
+                } else {
+                    // spawn a WHOAREYOU event to check for highest known ENR
+                    let event = SessionMessage::WhoAreYouRequest {
+                        src,
+                        src_id: src_id.clone(),
+                        auth_tag,
+                    };
+                    self.events.push(event);
+                }
+                return;
+            }
+        };
+
+        // we have a known session, decrypt and process the message
+        let message = match crypto::decrypt_message(&session.decryption_key, auth_tag, message, aad)
+        {
+            Ok(m) => Message::decode(message.to_vec()), // TODO: Build message struct
+            Err(e) => {
+                debug!("Message from node: {:?} in not encrypted with known session keys. Requesting WHOAREYOU packet. Error: {:?}", src_id, e);
+                // spawn a WHOAREYOU event to check for highest known ENR
+                let event = SessionMessage::WhoAreYouRequest {
+                    src,
+                    src_id: src_id.clone(),
+                    auth_tag,
+                };
+                self.events.push(event);
+                return;
+            }
+        };
+
+        // we have received a new message. Notify the protocol.
+        self.events.push(SessionMessage::Message(Box::new(message)));
     }
 
     // encrypts and sends any messages that were waiting for a session to be established
+    // TODO: Fix this once fleshed out
     #[inline]
     fn flush_messages(&mut self, src: SocketAddr, src_id: &NodeId, enr: &Enr, key: &[u8; 16]) {
+        let tag = self.tag(&src_id);
+
         let mut messages = match self.pending_messages.remove(src_id) {
             Some(v) => v,
             None => {
                 return;
             }
         };
-
-        let tag = self.tag(&src_id);
         for _ in 0..messages.len() {
             let msg = messages.pop().expect("item must exist");
             let (msg_cipher, auth_tag) =
-                match crypto::encrypt_message(key, &msg.encode(), &tag, None) {
+                match crypto::encrypt_message(key, None, &msg.encode(), &tag) {
                     Ok(v) => v,
                     Err(e) => {
                         warn!("Failed to encrypt message: {:?}, error: {:?}", msg, e);
@@ -313,15 +484,48 @@ impl SessionService {
                 auth_tag,
                 message: Box::new(msg_cipher),
             };
-            self.send_packet(src, enr, packet, &auth_tag);
+            self.send_packet(src, enr, packet, Some(&auth_tag));
         }
 
-        debug_assert!(messages.is_empty());
+        // do the same for any previous requests that may have been sent
+        // TODO: This could be expensive, potentially change data structures
+        let stale_reqs: Vec<AuthTag> = self
+            .pending_requests
+            .iter()
+            .filter(|(_, req)| req.node_id == *src_id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for req_auth_tag in stale_reqs.iter() {
+            let req = self
+                .pending_requests
+                .remove(req_auth_tag)
+                .expect("verified to exist");
+            let (msg_cipher, auth_tag) =
+                match crypto::encrypt_message(key, None, &req.packet.encode(), &tag) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!("Failed to encrypt message. Error: {:?}", e);
+                        return;
+                    }
+                };
+            let packet = Packet::Message {
+                tag,
+                auth_tag,
+                message: Box::new(msg_cipher),
+            };
+            self.send_packet(src, enr, packet, Some(&auth_tag));
+        }
     }
 
     // wrapper around service.send() that adds all sent messages to the pending_requests hashmap
     #[inline]
-    fn send_packet(&mut self, dst: SocketAddr, dst_enr: &Enr, packet: Packet, auth_tag: &AuthTag) {
+    fn send_packet(
+        &mut self,
+        dst: SocketAddr,
+        dst_enr: &Enr,
+        packet: Packet,
+        auth_tag: Option<&AuthTag>,
+    ) {
         self.service.send(dst, packet.clone());
         let dst_id = dst_enr.node_id();
         let request = Request {
@@ -334,7 +538,10 @@ impl SessionService {
 
         match &request.packet {
             Packet::WhoAreYou { .. } => self.whoareyou_requests.insert(dst_id, request),
-            _ => self.pending_requests.insert(auth_tag.clone(), request),
+            _ => self.pending_requests.insert(
+                auth_tag.expect("Programming Error if this is None").clone(),
+                request,
+            ),
         };
     }
 
@@ -359,8 +566,7 @@ impl SessionService {
                             auth_header,
                             message,
                         } => {
-                            let src_id = self.src_id(&tag);
-                            self.handle_auth_message(src, &src_id, auth_header, &message);
+                            self.handle_auth_message(src, tag, auth_header, &message);
                         }
                         Packet::Message {
                             tag,
@@ -368,8 +574,7 @@ impl SessionService {
                             message,
                         } => {
                             let src_id = self.src_id(&tag);
-                            //TODO: Send this upwards for higher-level logic
-                            //self.handle_message(src, src_id, auth_tag, message);
+                            self.handle_message(src, src_id, auth_tag, &message, &tag);
                         }
                         Packet::RandomPacket { .. } => {} // this will not be decoded.
                     }
@@ -394,11 +599,37 @@ impl Message {
         data.append(&mut mut_data);
         data
     }
+
+    pub fn decode(mut bytes: Vec<u8>) -> Self {
+        if bytes.is_empty() {
+            return Message {
+                message_type: 0,
+                message_data: Vec::new(),
+            };
+        }
+
+        Message {
+            message_type: bytes.remove(0),
+            message_data: bytes,
+        }
+    }
 }
 
+#[derive(Debug)]
 pub struct Discv5Message;
 
 #[derive(Debug)]
+pub enum SessionMessage {
+    Message(Box<Message>),
+    UpdatedEnr(Box<Enr>),
+    WhoAreYouRequest {
+        src: SocketAddr,
+        src_id: NodeId,
+        auth_tag: AuthTag,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub struct Request {
     pub dst: SocketAddr,
     pub enr: Enr,

@@ -44,7 +44,7 @@ pub enum Packet {
         /// The auth-tag of the request.
         token: AuthTag, //potentially rename to auth-tag
         /// The `id-nonce` to prevent handshake replays.
-        id_nonce: [u8; ID_NONCE_LENGTH],
+        id_nonce: Nonce,
         /// Highest known ENR sequence number of node.
         enr_seq: u64,
     },

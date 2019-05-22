@@ -37,8 +37,8 @@ impl AuthHeader {
 }
 
 pub struct AuthResponse {
-    signature: Vec<u8>,
-    updated_enr: Option<Enr>,
+    pub signature: Vec<u8>,
+    pub updated_enr: Option<Enr>,
 }
 
 impl AuthResponse {
