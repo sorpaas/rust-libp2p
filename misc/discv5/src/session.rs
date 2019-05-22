@@ -14,17 +14,16 @@ use std::default::Default;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
+use tokio::timer::Interval;
 
 mod tests;
 
 /// Seconds before the keys of an established connection timeout.
 //TODO: This is short for testing.
 const SESSION_TIMEOUT: u64 = 30;
-
 const REQUEST_TIMEOUT: u64 = 10;
-
-//TODO: Implement this
 const REQUEST_RETRIES: u8 = 2;
+const HEARTBEAT_INTERVAL: u64 = 5;
 
 pub struct SessionService {
     /// Queue of events produced by the session service.
@@ -44,6 +43,8 @@ pub struct SessionService {
     pending_messages: HashMap<NodeId, Vec<Message>>,
     /// Session keys. Established sessions for each NodeId.
     session_keys: HashMap<NodeId, Session>,
+    /// Heartbeat timer, used to to check for message and session timeouts.
+    heartbeat: Interval,
     /// The discovery v5 service.
     service: Discv5Service,
 }
@@ -95,6 +96,10 @@ impl SessionService {
             whoareyou_requests: HashMap::new(),
             pending_messages: HashMap::new(),
             session_keys: HashMap::new(),
+            heartbeat: Interval::new(
+                Instant::now() + Duration::from_secs(HEARTBEAT_INTERVAL),
+                Duration::from_secs(HEARTBEAT_INTERVAL),
+            ),
             service: Discv5Service::new(disc_socket_addr, magic)?,
         })
     }
@@ -231,7 +236,7 @@ impl SessionService {
         self.session_keys.insert(src_id.clone(), session);
 
         // flush the message cache
-        self.flush_messages(src, &src_id, &req.enr, &decryption_key);
+        self.flush_messages(src, &src_id, &req.enr, &encryption_key);
     }
 
     // Processing logic for receiving a message containing an Authentication header
@@ -349,6 +354,7 @@ impl SessionService {
                         "No session established, sending a random packet to: {}",
                         hex::encode(dst_id)
                     );
+
                     // need to establish a new session, send a random packet
                     let random_data = (0..44).map(|_| rand::random::<u8>()).collect();
                     let auth_tag: AuthTag = rand::random();
@@ -386,7 +392,6 @@ impl SessionService {
             auth_tag,
             message: Box::new(cipher),
         };
-
         self.send_packet(dst, dst_enr, packet, Some(&auth_tag));
     }
 
@@ -394,6 +399,12 @@ impl SessionService {
     /// highest known ENR then calls this function to send a WHOAREYOU packet.
     pub fn send_whoareyou(&mut self, dst: SocketAddr, dst_enr: &Enr, auth_tag: AuthTag) {
         let dst_id = dst_enr.node_id();
+
+        // check there is not already a WHOAREYOU packet already sent
+        if self.whoareyou_requests.get(&dst_id).is_some() {
+            warn!("WHOAREYOU packet already sent");
+            return;
+        }
         debug!("Sending WHOAREYOU packet to: {}", hex::encode(dst_id));
 
         let magic = {
@@ -469,6 +480,7 @@ impl SessionService {
         };
 
         // we have received a new message. Notify the protocol.
+        debug!("Message received: {:?}", message);
         self.events
             .push_back(SessionMessage::Message(Box::new(message)));
     }
@@ -476,35 +488,36 @@ impl SessionService {
     // encrypts and sends any messages that were waiting for a session to be established
     // TODO: Fix this once fleshed out
     #[inline]
-    fn flush_messages(&mut self, src: SocketAddr, src_id: &NodeId, enr: &Enr, key: &[u8; 16]) {
-        let tag = self.tag(&src_id);
+    fn flush_messages(&mut self, dst: SocketAddr, dst_id: &NodeId, enr: &Enr, key: &[u8; 16]) {
+        let tag = self.tag(&dst_id);
 
-        let mut messages = match self.pending_messages.remove(src_id) {
+        let mut messages = match self.pending_messages.remove(dst_id) {
             Some(v) => v,
             None => {
                 return;
             }
         };
         for _ in 0..messages.len() {
-            let msg = messages.pop().expect("item must exist");
-            let (msg_cipher, auth_tag) =
-                match crypto::encrypt_message(key, None, &msg.encode(), &tag) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!("Failed to encrypt message: {:?}, error: {:?}", msg, e);
-                        return;
-                    }
-                };
+            let msg = messages.remove(0);
+            let (cipher, auth_tag) = match crypto::encrypt_message(key, None, &msg.encode(), &tag) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("Failed to encrypt message: {:?}, error: {:?}", msg, e);
+                    return;
+                }
+            };
             let packet = Packet::Message {
                 tag,
                 auth_tag,
-                message: Box::new(msg_cipher),
+                message: Box::new(cipher.clone()),
             };
-            self.send_packet(src, enr, packet, Some(&auth_tag));
+            debug!("Sending cached message");
+            self.send_packet(dst, enr, packet, Some(&auth_tag));
         }
 
         // do the same for any previous requests that may have been sent
         // TODO: This could be expensive, potentially change data structures
+        /*
         let stale_reqs: Vec<AuthTag> = self
             .pending_requests
             .iter()
@@ -529,8 +542,10 @@ impl SessionService {
                 auth_tag,
                 message: Box::new(msg_cipher),
             };
+            debug!("Sending cached message");
             self.send_packet(src, enr, packet, Some(&auth_tag));
         }
+        */
     }
 
     // wrapper around service.send() that adds all sent messages to the pending_requests hashmap
@@ -550,6 +565,7 @@ impl SessionService {
             node_id: dst_id.clone(),
             packet,
             timeout: Instant::now() + Duration::from_secs(REQUEST_TIMEOUT),
+            retries: 0,
         };
 
         match &request.packet {
@@ -559,6 +575,24 @@ impl SessionService {
                 request,
             ),
         };
+    }
+
+    fn heartbeat(&mut self) {
+        // remove expired requests/sessions
+        self.pending_requests
+            .retain(|_, req| req.timeout >= Instant::now() && req.retries < REQUEST_RETRIES);
+        self.session_keys
+            .retain(|_, session| session.timeout <= Instant::now());
+
+        // resend requests
+        for req in self
+            .pending_requests
+            .values_mut()
+            .filter(|v| v.timeout < Instant::now())
+        {
+            self.service.send(req.dst, req.packet.clone());
+            req.retries += 1;
+        }
     }
 
     pub fn poll(&mut self) -> Async<SessionMessage> {
@@ -605,6 +639,19 @@ impl SessionService {
         }
 
         // check for timeouts
+        loop {
+            match self.heartbeat.poll() {
+                Ok(Async::Ready(_)) => {
+                    self.heartbeat();
+                }
+                Ok(Async::NotReady) => {
+                    break;
+                }
+                _ => {
+                    panic!("Discv5 heartbeat has ended");
+                }
+            }
+        }
 
         Async::NotReady
     }
@@ -661,6 +708,7 @@ pub struct Request {
     pub node_id: NodeId,
     pub packet: Packet,
     pub timeout: Instant,
+    pub retries: u8,
 }
 
 impl Request {
