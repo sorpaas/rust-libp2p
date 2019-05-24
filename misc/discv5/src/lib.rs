@@ -4,6 +4,7 @@
 //! peer-to-peer network.
 
 // mod behaviour;
+pub mod message;
 pub mod packet;
 
 mod crypto;

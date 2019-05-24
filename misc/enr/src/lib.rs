@@ -206,6 +206,13 @@ impl Enr {
         }
         false
     }
+
+    /// RLP encodes the ENR into a byte array.
+    pub fn encode(self) -> Vec<u8> {
+        let mut s = RlpStream::new();
+        s.append(&self);
+        s.drain()
+    }
 }
 
 impl std::fmt::Display for Enr {
