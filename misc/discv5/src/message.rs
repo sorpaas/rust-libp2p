@@ -6,8 +6,8 @@ type TopicHash = [u8; 32];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProtocolMessage {
-    id: u64,
-    body: MessageType,
+    pub id: u64,
+    pub body: MessageType,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -141,7 +141,7 @@ impl ProtocolMessage {
         }
     }
 
-    pub fn decode(data: &[u8]) -> Result<Self, DecodingError> {
+    pub fn decode(data: Vec<u8>) -> Result<Self, DecodingError> {
         if data.len() < 9 {
             return Err(DecodingError::TooSmall);
         }
@@ -361,7 +361,7 @@ mod tests {
         };
 
         let encoded = request.clone().encode();
-        let decoded = ProtocolMessage::decode(&encoded).unwrap();
+        let decoded = ProtocolMessage::decode(encoded).unwrap();
 
         assert_eq!(request, decoded);
     }
@@ -378,7 +378,7 @@ mod tests {
         };
 
         let encoded = request.clone().encode();
-        let decoded = ProtocolMessage::decode(&encoded).unwrap();
+        let decoded = ProtocolMessage::decode(encoded).unwrap();
 
         assert_eq!(request, decoded);
     }
@@ -391,7 +391,7 @@ mod tests {
         };
 
         let encoded = request.clone().encode();
-        let decoded = ProtocolMessage::decode(&encoded).unwrap();
+        let decoded = ProtocolMessage::decode(encoded).unwrap();
 
         assert_eq!(request, decoded);
     }
@@ -424,7 +424,7 @@ mod tests {
         };
 
         let encoded = request.clone().encode();
-        let decoded = ProtocolMessage::decode(&encoded).unwrap();
+        let decoded = ProtocolMessage::decode(encoded).unwrap();
 
         assert_eq!(request, decoded);
     }
@@ -437,7 +437,7 @@ mod tests {
         };
 
         let encoded = request.clone().encode();
-        let decoded = ProtocolMessage::decode(&encoded).unwrap();
+        let decoded = ProtocolMessage::decode(encoded).unwrap();
 
         assert_eq!(request, decoded);
     }
@@ -453,7 +453,7 @@ mod tests {
         };
 
         let encoded = request.clone().encode();
-        let decoded = ProtocolMessage::decode(&encoded).unwrap();
+        let decoded = ProtocolMessage::decode(encoded).unwrap();
 
         assert_eq!(request, decoded);
     }
@@ -468,7 +468,7 @@ mod tests {
         };
 
         let encoded = request.clone().encode();
-        let decoded = ProtocolMessage::decode(&encoded).unwrap();
+        let decoded = ProtocolMessage::decode(encoded).unwrap();
 
         assert_eq!(request, decoded);
     }
@@ -481,7 +481,7 @@ mod tests {
         };
 
         let encoded = request.clone().encode();
-        let decoded = ProtocolMessage::decode(&encoded).unwrap();
+        let decoded = ProtocolMessage::decode(encoded).unwrap();
 
         assert_eq!(request, decoded);
     }
@@ -494,7 +494,7 @@ mod tests {
         };
 
         let encoded = request.clone().encode();
-        let decoded = ProtocolMessage::decode(&encoded).unwrap();
+        let decoded = ProtocolMessage::decode(encoded).unwrap();
 
         assert_eq!(request, decoded);
     }

@@ -3,6 +3,7 @@ use super::packet::{
 };
 use super::service::Discv5Service;
 use crate::crypto;
+use crate::message::ProtocolMessage;
 use enr::{Enr, EnrBuilder};
 use futures::prelude::*;
 use hex;
@@ -40,7 +41,7 @@ pub struct SessionService {
     /// Keep track of sent WHOAREYOU packets separately for quick searching.
     whoareyou_requests: HashMap<NodeId, Request>,
     /// Pending messages. Messages awaiting to be sent, once a handshake has been established.
-    pending_messages: HashMap<NodeId, Vec<Message>>,
+    pending_messages: HashMap<NodeId, Vec<ProtocolMessage>>,
     /// Session keys. Established sessions for each NodeId.
     session_keys: HashMap<NodeId, Session>,
     /// Heartbeat timer, used to to check for message and session timeouts.
@@ -333,7 +334,7 @@ impl SessionService {
 
     /// Sends a message to a node given the nodes ENR. This function will handle establishing a
     /// session and retrying requests on timeout.
-    pub fn send_message(&mut self, dst_enr: &Enr, message: Message) {
+    pub fn send_message(&mut self, dst_enr: &Enr, message: ProtocolMessage) {
         // check for an established session
         let dst_id = dst_enr.node_id();
 
@@ -465,7 +466,13 @@ impl SessionService {
         // we have a known session, decrypt and process the message
         let message = match crypto::decrypt_message(&session.decryption_key, auth_tag, message, aad)
         {
-            Ok(m) => Message::decode(m), // TODO: Build message struct
+            Ok(m) => match ProtocolMessage::decode(m) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!("Failed to decode message. Error: {:?}", e);
+                    return;
+                }
+            },
             Err(e) => {
                 debug!("Message from node: {:?} in not encrypted with known session keys. Requesting WHOAREYOU packet. Error: {:?}", hex::encode(src_id), e);
                 // spawn a WHOAREYOU event to check for highest known ENR
@@ -502,7 +509,7 @@ impl SessionService {
             let (cipher, auth_tag) = match crypto::encrypt_message(key, None, &msg.encode(), &tag) {
                 Ok(v) => v,
                 Err(e) => {
-                    warn!("Failed to encrypt message: {:?}, error: {:?}", msg, e);
+                    warn!("Failed to encrypt message, Error: {:?}", e);
                     return;
                 }
             };
@@ -565,7 +572,7 @@ impl SessionService {
             node_id: dst_id.clone(),
             packet,
             timeout: Instant::now() + Duration::from_secs(REQUEST_TIMEOUT),
-            retries: 0,
+            retries: 1,
         };
 
         match &request.packet {
@@ -580,7 +587,7 @@ impl SessionService {
     fn heartbeat(&mut self) {
         // remove expired requests/sessions
         self.pending_requests
-            .retain(|_, req| req.timeout >= Instant::now() && req.retries < REQUEST_RETRIES);
+            .retain(|_, req| req.timeout >= Instant::now() || req.retries < REQUEST_RETRIES);
         self.session_keys
             .retain(|_, session| session.timeout <= Instant::now());
 
@@ -590,6 +597,7 @@ impl SessionService {
             .values_mut()
             .filter(|v| v.timeout < Instant::now())
         {
+            debug!("Resending message to {:?}", hex::encode(req.node_id));
             self.service.send(req.dst, req.packet.clone());
             req.retries += 1;
         }
@@ -657,41 +665,9 @@ impl SessionService {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Message {
-    message_type: u8,
-    message_data: Vec<u8>,
-}
-
-impl Message {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut data = self.message_type.to_be_bytes().to_vec();
-        let mut mut_data = self.message_data.clone();
-        data.append(&mut mut_data);
-        data
-    }
-
-    pub fn decode(mut bytes: Vec<u8>) -> Self {
-        if bytes.is_empty() {
-            return Message {
-                message_type: 0,
-                message_data: Vec::new(),
-            };
-        }
-
-        Message {
-            message_type: bytes.remove(0),
-            message_data: bytes,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct Discv5Message;
-
 #[derive(Debug)]
 pub enum SessionMessage {
-    Message(Box<Message>),
+    Message(Box<ProtocolMessage>),
     UpdatedEnr(Box<Enr>),
     WhoAreYouRequest {
         src: SocketAddr,
