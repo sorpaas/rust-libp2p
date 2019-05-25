@@ -1,8 +1,9 @@
-use libp2p_core::identity::error::SigningError;
 ///! A wrapper around the libp2p Keypair which performs ENR specific signing/verifcation.
-use libp2p_core::identity::{Keypair, PublicKey};
+use libp2p_core::identity::{self, Keypair, PublicKey};
 use secp256k1::Signature;
 use sha3::{Digest, Keccak256};
+use std::error::Error;
+use std::fmt;
 
 #[derive(Clone)]
 pub struct EnrKeypair {
@@ -21,14 +22,14 @@ impl EnrKeypair {
     pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, SigningError> {
         match self.inner {
             Keypair::Ed25519(ref keypair) => Ok(keypair.sign(msg)),
-            Keypair::Rsa(ref pair) => pair.sign(msg),
+            Keypair::Rsa(ref pair) => pair.sign(msg).map_err(|e| e.into()),
             Keypair::Secp256k1(ref pair) => {
                 // take a keccak256 hash then sign.
                 let hash = Keccak256::digest(msg);
                 let der_sig = pair.secret().sign_hash(&hash)?;
                 // convert to compact form
                 Ok(Signature::from_der(&der_sig)
-                    .map_err(|_| SigningError::from(String::from("Incorrect DER format")))?
+                    .map_err(|_| SigningError::new(String::from("Incorrect DER format")))?
                     .serialize_compact()
                     .to_vec())
             }
@@ -98,5 +99,47 @@ impl EnrPublicKey {
             PublicKey::Rsa(pk) => pk.encode_x509(),
             PublicKey::Secp256k1(pk) => pk.encode_uncompressed().to_vec(),
         }
+    }
+}
+
+/// An error during signing of a message.
+#[derive(Debug)]
+pub struct SigningError {
+    msg: String,
+    source: Option<Box<dyn Error + Send + Sync>>,
+}
+
+/// An error during encoding of key material.
+impl SigningError {
+    pub(crate) fn new<S: ToString>(msg: S) -> Self {
+        Self {
+            msg: msg.to_string(),
+            source: None,
+        }
+    }
+
+    pub(crate) fn source(self, source: impl Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Some(Box::new(source)),
+            ..self
+        }
+    }
+}
+
+impl From<identity::error::SigningError> for SigningError {
+    fn from(e: identity::error::SigningError) -> Self {
+        SigningError::new("Libp2p Signing Error").source(e)
+    }
+}
+
+impl fmt::Display for SigningError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Key signing error: {}", self.msg)
+    }
+}
+
+impl Error for SigningError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source.as_ref().map(|s| &**s as &dyn Error)
     }
 }

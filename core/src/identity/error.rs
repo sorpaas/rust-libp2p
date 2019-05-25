@@ -27,24 +27,16 @@ use std::fmt;
 #[derive(Debug)]
 pub struct DecodingError {
     msg: String,
-    source: Option<Box<dyn Error + Send + Sync>>,
+    source: Option<Box<dyn Error + Send + Sync>>
 }
 
 impl DecodingError {
-    pub(crate) fn new(msg: &str, source: impl Error + Send + Sync + 'static) -> DecodingError {
-        DecodingError {
-            msg: msg.to_string(),
-            source: Some(Box::new(source)),
-        }
+    pub(crate) fn new<S: ToString>(msg: S) -> Self {
+        Self { msg: msg.to_string(), source: None }
     }
-}
 
-impl From<String> for DecodingError {
-    fn from(s: String) -> DecodingError {
-        DecodingError {
-            msg: s,
-            source: None,
-        }
+    pub(crate) fn source(self, source: impl Error + Send + Sync + 'static) -> Self {
+        Self { source: Some(Box::new(source)), .. self }
     }
 }
 
@@ -64,16 +56,17 @@ impl Error for DecodingError {
 #[derive(Debug)]
 pub struct SigningError {
     msg: String,
-    source: Option<Box<dyn Error + Send + Sync>>,
+    source: Option<Box<dyn Error + Send + Sync>>
 }
 
 /// An error during encoding of key material.
 impl SigningError {
-    pub(crate) fn new(msg: &str, source: impl Error + Send + Sync + 'static) -> SigningError {
-        SigningError {
-            msg: msg.to_string(),
-            source: Some(Box::new(source)),
-        }
+    pub(crate) fn new<S: ToString>(msg: S) -> Self {
+        Self { msg: msg.to_string(), source: None }
+    }
+
+    pub(crate) fn source(self, source: impl Error + Send + Sync + 'static) -> Self {
+        Self { source: Some(Box::new(source)), .. self }
     }
 }
 
@@ -83,17 +76,9 @@ impl fmt::Display for SigningError {
     }
 }
 
-impl From<String> for SigningError {
-    fn from(s: String) -> SigningError {
-        SigningError {
-            msg: s,
-            source: None,
-        }
-    }
-}
-
 impl Error for SigningError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         self.source.as_ref().map(|s| &**s as &dyn Error)
     }
 }
+

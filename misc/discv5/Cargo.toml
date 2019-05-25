@@ -10,7 +10,7 @@ keywords = ["peer-to-peer", "libp2p", "networking", "discovery", "devp2p"]
 categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-libp2p-core = { version = "0.7.0", path = "../../core" }
+libp2p-core = { version = "0.8.0", path = "../../core" }
 multiaddr = { package = "parity-multiaddr", version = "0.4.0", path = "../multiaddr" }
 enr = { path = "../enr" }
 data-encoding = "2.0"

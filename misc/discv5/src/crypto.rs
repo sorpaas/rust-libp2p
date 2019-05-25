@@ -14,7 +14,7 @@ use hkdf::Hkdf;
 use lazy_static::lazy_static;
 use libp2p_core::{identity::Keypair, PublicKey};
 use openssl::symm::{decrypt_aead, encrypt_aead, Cipher};
-use rand;
+use rand::RngCore;
 use sha2::Sha256;
 
 const INFO_LENGTH: usize = 26 + 2 * NODE_ID_LENGTH;
@@ -56,19 +56,23 @@ pub fn generate_session_keys(
             let remote_pk = secp256k1::key::PublicKey::from_slice(&pubkey.encode())
                 .map_err(|_| Discv5Error::UnknownPublicKey)?;
 
-            let ephem_sk = secp256k1::key::SecretKey::new(&mut secp256k1::rand::thread_rng());
-            let ephem_pk = secp256k1::key::PublicKey::from_secret_key(&SECP, &ephem_sk);
+            let ephem_sk = {
+                let mut r = rand::thread_rng();
+                let mut b = [0; secp256k1::constants::SECRET_KEY_SIZE];
+                loop {
+                    // until a value is given within the curve order
+                    r.fill_bytes(&mut b);
+                    if let Ok(k) = secp256k1::SecretKey::from_slice(&b) {
+                        break k;
+                    }
+                }
+            };
 
+            let secp = secp256k1::Secp256k1::new();
+            let ephem_pk = secp256k1::PublicKey::from_secret_key(&secp, &ephem_sk);
             let secret = secp256k1::ecdh::SharedSecret::new(&remote_pk, &ephem_sk);
 
-            /* Don't convert to a libp2p public key yet
-            // convert to a libp2p public key
-            // TODO: It may be more sensible to leave as a raw encoded public key
-            let libp2p_pk =
-                libp2p_core::identity::secp256k1::PublicKey::decode(&ephem_pk.serialize())
-                    .expect("Valid public key");
-            let ephem_pk = PublicKey::Secp256k1(libp2p_pk);
-            */
+            // store as uncompressed
             let ephem_pk = ephem_pk.serialize().to_vec();
 
             (secret, ephem_pk)
@@ -133,7 +137,7 @@ pub fn derive_keys_from_pubkey(
                 .map_err(|_| Discv5Error::InvalidRemotePublicKey)?;
 
             // convert our secret key into a secp256k1 secret key
-            let sk = secp256k1::key::SecretKey::from_slice(key.secret().as_ref())
+            let sk = secp256k1::key::SecretKey::from_slice(&key.secret().to_bytes())
                 .map_err(|_| Discv5Error::InvalidSecretKey)?;
 
             let secret = secp256k1::ecdh::SharedSecret::new(&remote_pubkey, &sk);
