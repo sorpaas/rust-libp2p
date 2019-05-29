@@ -5,6 +5,7 @@ mod tests {
     use crate::message::MessageType;
     use libp2p_core::identity::Keypair;
     //    use simple_logger;
+    use enr::EnrBuilder;
     use tokio::prelude::*;
     use tokio_timer::Delay;
 
@@ -14,10 +15,11 @@ mod tests {
 
         let port = 5000;
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
-        let socket = SocketAddr::new(ip, port);
         let keypair = Keypair::generate_secp256k1();
 
-        let mut service = SessionService::new(socket, keypair.clone(), None).unwrap();
+        let enr = EnrBuilder::new().ip(ip).udp(port).build(&keypair).unwrap();
+
+        let mut service = SessionService::new(enr, keypair.clone()).unwrap();
 
         // send a message after 1 second
         let mut delay = Delay::new(Instant::now() + Duration::from_millis(100));
@@ -72,10 +74,11 @@ mod tests {
         //       let _ = simple_logger::init_with_level(log::Level::Debug);
         let port = 5001;
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
-        let socket = SocketAddr::new(ip, port);
         let keypair = Keypair::generate_secp256k1();
 
-        let mut service = SessionService::new(socket, keypair.clone(), None).unwrap();
+        let enr = EnrBuilder::new().ip(ip).udp(port).build(&keypair).unwrap();
+
+        let mut service = SessionService::new(enr, keypair.clone()).unwrap();
 
         // send messages after 1 second
         let mut delay = Delay::new(Instant::now() + Duration::from_millis(100));

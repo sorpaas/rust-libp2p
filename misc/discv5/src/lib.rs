@@ -7,7 +7,9 @@
 pub mod message;
 pub mod packet;
 
+mod behaviour;
 mod crypto;
 mod error;
+mod kbucket;
 mod service;
 pub mod session;

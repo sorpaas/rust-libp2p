@@ -12,8 +12,10 @@ categories = ["network-programming", "asynchronous"]
 [dependencies]
 libp2p-core = { version = "0.8.0", path = "../../core" }
 multiaddr = { package = "parity-multiaddr", version = "0.4.0", path = "../multiaddr" }
+multihash = { package = "parity-multihash", version = "0.1.0", path = "../../misc/multihash" }
 enr = { path = "../enr" }
 data-encoding = "2.0"
+bigint = "4.2"
 futures = "0.1"
 log = "0.4"
 net2 = "0.2"
@@ -34,8 +36,10 @@ openssl = "0.10.23"
 hex = "0.3.2"
 tokio = "0.1.20"
 fnv = "1.0.6"
+arrayvec = "0.4.10"
 
 [dev-dependencies]
 simple_logger = "1.0.1"
 tokio-timer = "0.2.11"
 tokio = "0.1.20"
+quickcheck = "0.8"

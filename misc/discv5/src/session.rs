@@ -50,37 +50,23 @@ pub struct SessionService {
 }
 
 impl SessionService {
-    /// A new Session service which instantiates the UDP socket and builds a local ENR to send to
-    /// other nodes. This requires a `Keypair` to sign the ENR and set up encrypted sessions
-    /// with other peers. The `tcp` parameter can be optionally given to add to the ENR record to
-    /// alert other peers of a listening tcp port.
-    pub fn new(
-        disc_socket_addr: SocketAddr,
-        keypair: Keypair,
-        tcp: Option<u16>,
-    ) -> io::Result<Self> {
-        // build the local ENR
-        let enr = {
-            let mut enr_builder = EnrBuilder::new();
-            enr_builder
-                .ip(disc_socket_addr.ip())
-                .udp(disc_socket_addr.port());
-            if let Some(tcp_port) = tcp {
-                enr_builder.tcp(tcp_port);
-            }
-            enr_builder.build(&keypair).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Could not build the ENR record",
-                )
-            })
-        }?;
+    /// A new Session service which instantiates the UDP socket.
+    pub fn new(enr: Enr, keypair: Keypair) -> io::Result<Self> {
+        // ensure the keypair matches the one that signed the enr.
+        if enr.public_key().into_protobuf_encoding() != keypair.public().into_protobuf_encoding() {
+            panic!("Discv5: Provided keypair does not match the provided ENR keypair");
+        }
 
+        let udp = enr.udp().unwrap_or_else(|| 9000);
+        let ip = enr
+            .ip()
+            .unwrap_or_else(|| "127.0.0.1".parse().expect("valid ip"));
+
+        let socket_addr = SocketAddr::new(ip, udp);
         // generates the WHOAREYOU magic packet for the local node-id
-        let node_id = enr.node_id;
         let magic = {
             let mut hasher = Sha256::new();
-            hasher.input(node_id);
+            hasher.input(enr.node_id);
             hasher.input(b"WHOAREYOU");
             let mut magic = [0u8; MAGIC_LENGTH];
             magic.copy_from_slice(&hasher.result());
@@ -99,7 +85,7 @@ impl SessionService {
                 Instant::now() + Duration::from_secs(HEARTBEAT_INTERVAL),
                 Duration::from_secs(HEARTBEAT_INTERVAL),
             ),
-            service: Discv5Service::new(disc_socket_addr, magic)?,
+            service: Discv5Service::new(socket_addr, magic)?,
         })
     }
 
