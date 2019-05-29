@@ -56,12 +56,12 @@ impl From<PublicKey> for EnrPublicKey {
 }
 
 /// Generates the ENR public key strings related associated with each `Keypair` variant.
-impl Into<String> for EnrKeypair {
+impl Into<String> for EnrPublicKey {
     fn into(self) -> String {
         match self.inner {
-            Keypair::Ed25519(_) => String::from("ed25519"),
-            Keypair::Rsa(_) => String::from("rsa"),
-            Keypair::Secp256k1(_) => String::from("secp256k1"),
+            PublicKey::Ed25519(_) => String::from("ed25519"),
+            PublicKey::Rsa(_) => String::from("rsa"),
+            PublicKey::Secp256k1(_) => String::from("secp256k1"),
         }
     }
 }

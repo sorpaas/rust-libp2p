@@ -35,9 +35,7 @@ pub fn generate_session_keys(
     id_nonce: &Nonce,
 ) -> Result<(Key, Key, Key, Vec<u8>), Discv5Error> {
     // verify we know the public key and it's type
-    let pubkey = remote_enr
-        .pubkey()
-        .ok_or_else(|| Discv5Error::UnknownPublicKey)?;
+    let pubkey = remote_enr.public_key();
 
     let (secret, ephem_pk) = match &pubkey {
         PublicKey::Rsa(_) => {
@@ -80,7 +78,7 @@ pub fn generate_session_keys(
     };
 
     let (initiator_key, responder_key, auth_resp_key) =
-        derive_key(&secret[..], local_id, &remote_enr.node_id(), id_nonce)?;
+        derive_key(&secret[..], local_id, &remote_enr.node_id, id_nonce)?;
 
     Ok((initiator_key, responder_key, auth_resp_key, ephem_pk))
 }
@@ -174,9 +172,7 @@ pub fn verify_authentication_header(
         .map_err(|_| Discv5Error::Custom("Invalid auth response format"))?;
 
     // verify the nonce signature
-    let remote_pubkey = remote_enr
-        .pubkey()
-        .ok_or_else(|| Discv5Error::InvalidRemotePublicKey)?;
+    let remote_pubkey = remote_enr.public_key();
     let nonce = generate_nonce(id_nonce);
     if !remote_pubkey.verify(&nonce, &auth_response.signature) {
         return Err(Discv5Error::InvalidSignature);
@@ -284,11 +280,11 @@ mod tests {
         let nonce: Nonce = rand::random();
 
         let (key1, key2, key3, pk) =
-            generate_session_keys(&node1_enr.node_id(), &node2_enr, &nonce).unwrap();
+            generate_session_keys(&node1_enr.node_id, &node2_enr, &nonce).unwrap();
         let (key4, key5, key6) = derive_keys_from_pubkey(
             &node2_kp,
-            &node2_enr.node_id(),
-            &node1_enr.node_id(),
+            &node2_enr.node_id,
+            &node1_enr.node_id,
             &nonce,
             &pk,
         )

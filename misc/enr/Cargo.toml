@@ -10,6 +10,7 @@ rlp = "0.3.0"
 log = "0.4"
 secp256k1 = "0.12.2"
 sha3 = "0.8.2"
+bs58 = "0.2.2"
 
 [dev-dependencies]
 hex = "0.3.2"

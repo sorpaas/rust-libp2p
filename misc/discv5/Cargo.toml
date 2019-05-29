@@ -33,6 +33,7 @@ zeroize = "0.6.0"
 openssl = "0.10.23"
 hex = "0.3.2"
 tokio = "0.1.20"
+fnv = "1.0.6"
 
 [dev-dependencies]
 simple_logger = "1.0.1"

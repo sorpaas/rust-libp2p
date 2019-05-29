@@ -5,6 +5,7 @@
 mod enr_keypair;
 
 use crate::enr_keypair::{EnrKeypair, EnrPublicKey};
+use bs58;
 use libp2p_core::identity::{ed25519, Keypair, PublicKey};
 use log::debug;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
@@ -14,6 +15,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use libp2p_core::identity::rsa;
 use libp2p_core::identity::secp256k1 as libp2p_secp256k1;
+use libp2p_core::PeerId;
 
 const MAX_ENR_SIZE: usize = 300;
 
@@ -22,6 +24,8 @@ const MAX_ENR_SIZE: usize = 300;
 pub struct Enr {
     /// ENR sequence number.
     pub seq: u64,
+    /// The Node Id of the ENR record.
+    pub node_id: [u8; 32],
     /// Key-value contents of the ENR.
     content: HashMap<String, Vec<u8>>,
     /// RLP-encoded content. This exists because Hashmaps do not preserve ordering and the signature
@@ -32,19 +36,9 @@ pub struct Enr {
 }
 
 impl Enr {
-    /// Returns the node-id of the associated ENR record (if one exists). This is the keccak256
-    /// hash of the public key. ENR record cannot be created without a valid public key.
-    /// Therefore this will always return a value.
-    pub fn node_id(&self) -> [u8; 32] {
-        let pubkey_bytes: Vec<u8> = self
-            .pubkey()
-            .and_then(|pk| Some(EnrPublicKey::from(pk).encode_uncompressed()))
-            .unwrap_or_else(|| Vec::new()); // should never not have a public key.
-
-        let mut node_id: [u8; 32] = [0; 32];
-        let hash = Keccak256::digest(&pubkey_bytes);
-        node_id.copy_from_slice(&hash);
-        node_id
+    /// The libp2p PeerId for the record.
+    pub fn peer_id(&self) -> PeerId {
+        self.public_key().into()
     }
 
     /// Adds a key/value to the ENR record. A keypair is required to re-sign the record once
@@ -58,9 +52,10 @@ impl Enr {
         self.content.insert(key.into(), value);
         // add the new public key
         // convert the libp2p keypair into an EnrKeypair
-        let enr_keypair = EnrKeypair::from(keypair);
+        let enr_keypair = EnrKeypair::from(keypair.clone());
+        let public_key = enr_keypair.public();
         self.content
-            .insert(enr_keypair.clone().into(), enr_keypair.public().encode());
+            .insert(public_key.clone().into(), public_key.encode());
         // increment the sequence number
         self.seq += 1;
 
@@ -68,6 +63,10 @@ impl Enr {
         let signature = enr_keypair
             .sign(&self.rlp_content())
             .map_err(|_| EnrError::SigningError)?;
+
+        // update the node id
+        self.node_id = Enr::node_id(&keypair.public());
+
         // check the size of the record
         if self.rlp_content.len() + signature.len() + 8 > MAX_ENR_SIZE {
             return Err(EnrError::ExceedsMaxSize);
@@ -88,6 +87,17 @@ impl Enr {
         stream.drain()
     }
 
+    /// Returns the node-id of the associated ENR record. This is the keccak256
+    /// hash of the public key. ENR record cannot be created without a valid public key.
+    /// Therefore this will always return a value.
+    fn node_id(public_key: &PublicKey) -> [u8; 32] {
+        let pubkey_bytes = EnrPublicKey::from(public_key.clone()).encode_uncompressed();
+        let mut node_id: [u8; 32] = [0; 32];
+        let hash = Keccak256::digest(&pubkey_bytes);
+        node_id.copy_from_slice(&hash);
+        node_id
+    }
+
     pub fn set_ip(&mut self, ip: IpAddr, keypair: Keypair) -> Result<bool, EnrError> {
         let ip_bytes = match ip {
             IpAddr::V4(addr) => addr.octets().to_vec(),
@@ -104,10 +114,10 @@ impl Enr {
         self.add_key("tcp", tcp.to_be_bytes().to_vec(), keypair)
     }
 
-    pub fn set_pubkey(&mut self, keypair: &Keypair) {
-        let enr_kp = EnrKeypair::from(keypair.clone());
+    pub fn set_public_key(&mut self, keypair: &Keypair) {
+        let enr_public = EnrKeypair::from(keypair.clone()).public();
         self.content
-            .insert(enr_kp.clone().into(), enr_kp.public().encode());
+            .insert(enr_public.clone().into(), enr_public.encode());
     }
 
     /// Returns the IP address of the ENR record if it is defined.
@@ -178,33 +188,30 @@ impl Enr {
         &self.signature
     }
 
-    /// Returns the public key of the ENR record if it is defined and it's type is known.
-    pub fn pubkey(&self) -> Option<PublicKey> {
-        // try known pubkeys.
+    /// Returns the public key of the ENR record.
+    pub fn public_key(&self) -> PublicKey {
+        // Must have a known public key type.
         // TODO: Build a mapping of known pubkeys
         if let Some(pubkey_bytes) = self.content.get("secp256k1") {
             return libp2p_secp256k1::PublicKey::decode(pubkey_bytes)
                 .map(PublicKey::Secp256k1)
-                .ok();
+                .expect("Valid secp256k1 key");
         } else if let Some(pubkey_bytes) = self.content.get("ed25519") {
             return ed25519::PublicKey::decode(pubkey_bytes)
                 .map(PublicKey::Ed25519)
-                .ok();
+                .expect("Valid ed25519 public key");
         } else if let Some(pubkey_bytes) = self.content.get("rsa") {
             return rsa::PublicKey::decode_x509(pubkey_bytes)
                 .map(PublicKey::Rsa)
-                .ok();
+                .expect("Valid rsa public key");
         }
-        None
+        panic!("An ENR was created with an unknown public key");
     }
 
     /// Verify the signature of the ENR record.
     pub fn verify(&self) -> bool {
-        if let Some(pubkey) = self.pubkey() {
-            let enr_pubkey = EnrPublicKey::from(pubkey);
-            return enr_pubkey.verify(&self.rlp_content, &self.signature);
-        }
-        false
+        let enr_pubkey = EnrPublicKey::from(self.public_key());
+        return enr_pubkey.verify(&self.rlp_content, &self.signature);
     }
 
     /// RLP encodes the ENR into a byte array.
@@ -217,16 +224,22 @@ impl Enr {
 
 impl std::fmt::Display for Enr {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "Enr: Id: {:?}, seq: {}, ip: {:?}, tcp: {:?}, udp: {:?}, public key: {:?}",
-            self.node_id(),
-            self.seq,
-            self.ip(),
-            self.tcp(),
-            self.udp(),
-            self.pubkey(),
-        )
+        f.debug_struct("ENR")
+            .field("NodeId", &bs58::encode(self.node_id).into_string())
+            //.field("PeerId", self.peer_id().to_base(58))
+            .field("seq", &self.seq)
+            .field("ip", &self.ip())
+            .field("tcp", &self.tcp())
+            .field("udp", &self.udp())
+            .field("public key", &self.public_key())
+            .finish()
+    }
+}
+
+// Implemented for Kademelia Bucket Keys
+impl AsRef<[u8]> for Enr {
+    fn as_ref(&self) -> &[u8] {
+        &self.node_id
     }
 }
 
@@ -293,16 +306,14 @@ impl EnrBuilder {
         stream.drain()
     }
 
-    fn add_pubkey(&mut self, key: &Keypair) {
-        let enr_keypair = EnrKeypair::from(key.clone());
-        self.add_value(enr_keypair.clone().into(), enr_keypair.public().encode());
+    fn add_public_key(&mut self, key: &EnrPublicKey) {
+        self.add_value(key.clone().into(), key.encode());
     }
 
     pub fn build(&mut self, key: &Keypair) -> Result<Enr, EnrError> {
-        self.add_pubkey(key);
-        let rlp_content = self.rlp_content();
-
         let enr_key = EnrKeypair::from(key.clone());
+        self.add_public_key(&enr_key.public());
+        let rlp_content = self.rlp_content();
 
         // construct compact signature
         let signature = enr_key
@@ -316,6 +327,7 @@ impl EnrBuilder {
 
         Ok(Enr {
             seq: self.seq,
+            node_id: Enr::node_id(&key.public()),
             content: self.content.clone(),
             rlp_content,
             signature,
@@ -386,8 +398,31 @@ impl Decodable for Enr {
 
         let rlp_content = rlp::encode_list::<Vec<u8>, Vec<u8>>(&rev_rlp_encodings);
 
+        // verify we know the signature type
+        let public_key = {
+            if let Some(pubkey_bytes) = content.get("secp256k1") {
+                libp2p_secp256k1::PublicKey::decode(pubkey_bytes)
+                    .map(PublicKey::Secp256k1)
+                    .map_err(|_| DecoderError::Custom("Invalid Secp256k1 Signature"))?
+            } else if let Some(pubkey_bytes) = content.get("ed25519") {
+                ed25519::PublicKey::decode(pubkey_bytes)
+                    .map(PublicKey::Ed25519)
+                    .map_err(|_| DecoderError::Custom("Invalid ed25519 Signature"))?
+            } else if let Some(pubkey_bytes) = content.get("rsa") {
+                rsa::PublicKey::decode_x509(pubkey_bytes)
+                    .map(PublicKey::Rsa)
+                    .map_err(|_| DecoderError::Custom("Invalid rsa Signature"))?
+            } else {
+                return Err(DecoderError::Custom("Unknown signature"));
+            }
+        };
+
+        // calculate the node id
+        let node_id = Enr::node_id(&public_key);
+
         let enr = Enr {
             seq,
+            node_id,
             signature,
             content,
             rlp_content,
@@ -424,7 +459,7 @@ mod tests {
 
         let enr = rlp::decode::<Enr>(&valid_record).unwrap();
 
-        let pubkey = match enr.pubkey().unwrap() {
+        let pubkey = match enr.public_key() {
             PublicKey::Secp256k1(key) => Some(key.encode()),
             _ => None,
         };
@@ -460,7 +495,11 @@ mod tests {
         assert_eq!(decoded_enr.id(), Some(id.into()));
         assert_eq!(decoded_enr.ip(), Some(ip.into()));
         assert_eq!(decoded_enr.tcp(), Some(tcp));
-        assert_eq!(decoded_enr.pubkey(), Some(key.public()));
+        // Must compare encoding as the public key itself can be different
+        assert_eq!(
+            decoded_enr.public_key().into_protobuf_encoding(),
+            key.public().into_protobuf_encoding()
+        );
     }
 
     #[test]
@@ -485,7 +524,7 @@ mod tests {
         assert_eq!(decoded_enr.id(), Some(id.into()));
         assert_eq!(decoded_enr.ip(), Some(ip.into()));
         assert_eq!(decoded_enr.tcp(), Some(tcp));
-        assert_eq!(decoded_enr.pubkey(), Some(key.public()));
+        assert_eq!(decoded_enr.public_key(), key.public());
     }
 
     #[test]
@@ -507,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_tcp() {
+    fn test_set_ip() {
         let key = Keypair::generate_secp256k1();
         let id = "v5";
         let tcp = 30303;
@@ -524,6 +563,11 @@ mod tests {
         assert_eq!(enr.id(), Some(id.into()));
         assert_eq!(enr.ip(), Some(ip.into()));
         assert_eq!(enr.tcp(), Some(tcp));
-        assert_eq!(enr.pubkey(), Some(key.public()));
+
+        // Compare the encoding as the key itself can be differnet
+        assert_eq!(
+            enr.public_key().into_protobuf_encoding(),
+            key.public().into_protobuf_encoding()
+        );
     }
 }
