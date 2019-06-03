@@ -15,7 +15,7 @@ pub const NODE_ID_LENGTH: usize = 32;
 pub const TAG_LENGTH: usize = 32;
 const AUTH_TAG_LENGTH: usize = 12;
 pub const MAGIC_LENGTH: usize = 32;
-pub const ID_NONCE_LENGTH: usize = 12;
+pub const ID_NONCE_LENGTH: usize = 32;
 
 /// The authentication nonce (12 bytes).
 pub type AuthTag = [u8; AUTH_TAG_LENGTH];
@@ -125,6 +125,87 @@ impl Packet {
         }
     }
 
+    fn decode_whoareyou(tag: Tag, data: &[u8]) -> Result<Self, PacketError> {
+        // 32 tag + 32 magic + 32 token + 12 id + 2 enr + 1 rlp
+        // decode the rlp list
+        let rlp_list = data[TAG_LENGTH + MAGIC_LENGTH..].to_vec();
+        let rlp = rlp::Rlp::new(&rlp_list);
+        let mut decoded_list = match rlp.as_list::<Vec<u8>>() {
+            Ok(v) => v,
+            Err(_) => {
+                debug!("Could not decode WHOAREYOU packet: {:?}", data);
+                return Err(PacketError::UnknownFormat);
+            }
+        };
+        // build objects
+        let mut magic: [u8; MAGIC_LENGTH] = Default::default();
+        magic.clone_from_slice(&data[TAG_LENGTH..TAG_LENGTH + MAGIC_LENGTH]);
+
+        if decoded_list.len() != 3 {
+            debug!(
+                "Failed to decode WHOAREYOU packet. Incorrect list size. Length: {}, expected 3",
+                decoded_list.len()
+            );
+            return Err(PacketError::UnknownFormat);
+        }
+
+        let enr_seq_bytes = decoded_list.pop().expect("List is long enough");
+        let mut enr_seq: [u8; 8] = Default::default();
+        enr_seq.clone_from_slice(&enr_seq_bytes);
+        let enr_seq = u64::from_be_bytes(enr_seq);
+
+        let id_nonce_bytes = decoded_list.pop().expect("List is long enough");
+        let mut id_nonce: [u8; ID_NONCE_LENGTH] = Default::default();
+        id_nonce.clone_from_slice(&id_nonce_bytes);
+
+        let token_bytes = decoded_list.pop().expect("List is long enough");
+        let mut token: AuthTag = Default::default();
+        token.clone_from_slice(&token_bytes);
+
+        return Ok(Packet::WhoAreYou {
+            tag,
+            magic,
+            token,
+            id_nonce,
+            enr_seq,
+        });
+    }
+
+    fn decode_standard_message(tag: Tag, data: &[u8]) -> Result<Self, PacketError> {
+        let rlp = rlp::Rlp::new(&data[TAG_LENGTH..TAG_LENGTH + AUTH_TAG_LENGTH + 1]);
+        let auth_tag_bytes: Vec<u8> = match rlp.as_val() {
+            Ok(v) => v,
+            Err(_) => {
+                debug!("Couldn't decode auth_tag for message: {:?}", data);
+                return Err(PacketError::UnknownFormat);
+            }
+        };
+
+        let mut auth_tag: AuthTag = Default::default();
+        auth_tag.clone_from_slice(&auth_tag_bytes);
+
+        return Ok(Packet::Message {
+            tag,
+            auth_tag,
+            message: Box::new(data[TAG_LENGTH + AUTH_TAG_LENGTH + 1..].to_vec()),
+        });
+    }
+
+    fn decode_auth_header(tag: Tag, data: &[u8], rlp_length: usize) -> Result<Self, PacketError> {
+        let auth_header_rlp = rlp::Rlp::new(&data[TAG_LENGTH..TAG_LENGTH + rlp_length]);
+        let auth_header =
+            AuthHeader::decode(&auth_header_rlp).map_err(|_| PacketError::UnknownFormat)?;
+
+        let message_start = TAG_LENGTH + rlp_length;
+        let message = Box::new(data[message_start..].to_vec());
+
+        return Ok(Packet::AuthMessage {
+            tag,
+            auth_header,
+            message,
+        });
+    }
+
     /// Decode raw bytes into a packet. The `magic` value (SHA2256(node-id, b"WHOAREYOU")) is passed as a parameter to check for
     /// the magic byte sequence.
     pub fn decode(data: &[u8], magic_data: &[u8]) -> Result<Self, PacketError> {
@@ -142,46 +223,7 @@ impl Packet {
         if &data[TAG_LENGTH..TAG_LENGTH + MAGIC_LENGTH] == magic_data
             && data.len() == who_packet_len
         {
-            // 32 tag + 32 magic + 32 token + 12 id + 2 enr + 1 rlp
-            // decode the rlp list
-            let rlp_list = data[TAG_LENGTH + MAGIC_LENGTH..].to_vec();
-            let rlp = rlp::Rlp::new(&rlp_list);
-            let mut decoded_list = match rlp.as_list::<Vec<u8>>() {
-                Ok(v) => v,
-                Err(_) => {
-                    debug!("Could not decode WHOAREYOU packet: {:?}", data);
-                    return Err(PacketError::UnknownFormat);
-                }
-            };
-            // build objects
-            let mut magic: [u8; MAGIC_LENGTH] = Default::default();
-            magic.clone_from_slice(&data[TAG_LENGTH..TAG_LENGTH + MAGIC_LENGTH]);
-
-            if decoded_list.len() != 3 {
-                debug!("Failed to decode WHOAREYOU packet. Incorrect list size. Length: {}, expected 3", decoded_list.len());
-                return Err(PacketError::UnknownFormat);
-            }
-
-            let enr_seq_bytes = decoded_list.pop().expect("List is long enough");
-            let mut enr_seq: [u8; 8] = Default::default();
-            enr_seq.clone_from_slice(&enr_seq_bytes);
-            let enr_seq = u64::from_be_bytes(enr_seq);
-
-            let id_nonce_bytes = decoded_list.pop().expect("List is long enough");
-            let mut id_nonce: [u8; ID_NONCE_LENGTH] = Default::default();
-            id_nonce.clone_from_slice(&id_nonce_bytes);
-
-            let token_bytes = decoded_list.pop().expect("List is long enough");
-            let mut token: AuthTag = Default::default();
-            token.clone_from_slice(&token_bytes);
-
-            return Ok(Packet::WhoAreYou {
-                tag,
-                magic,
-                token,
-                id_nonce,
-                enr_seq,
-            });
+            return Packet::decode_whoareyou(tag, data);
         }
         // not a WHOAREYOU packet
 
@@ -190,23 +232,7 @@ impl Packet {
             // 8c in hex - rlp encoded bytes of length 12 -i.e rlp_bytes(auth_tag)
             // we have either a random-packet or standard message
             // return the encrypted standard message.
-            let rlp = rlp::Rlp::new(&data[TAG_LENGTH..TAG_LENGTH + AUTH_TAG_LENGTH + 1]);
-            let auth_tag_bytes: Vec<u8> = match rlp.as_val() {
-                Ok(v) => v,
-                Err(_) => {
-                    debug!("Couldn't decode auth_tag for message: {:?}", data);
-                    return Err(PacketError::UnknownFormat);
-                }
-            };
-
-            let mut auth_tag: AuthTag = Default::default();
-            auth_tag.clone_from_slice(&auth_tag_bytes);
-
-            return Ok(Packet::Message {
-                tag,
-                auth_tag,
-                message: Box::new(data[TAG_LENGTH + AUTH_TAG_LENGTH + 1..].to_vec()),
-            });
+            return Packet::decode_standard_message(tag, data);
         }
         // not a Random Packet or standard message, may be a message with authentication header
         let rlp = rlp::Rlp::new(&data[TAG_LENGTH..]);
@@ -221,20 +247,8 @@ impl Packet {
                 })?
                 .total();
 
-            let auth_header_rlp = rlp::Rlp::new(&data[TAG_LENGTH..TAG_LENGTH + rlp_length]);
-            let auth_header =
-                AuthHeader::decode(&auth_header_rlp).map_err(|_| PacketError::UnknownFormat)?;
-
-            let message_start = TAG_LENGTH + rlp_length;
-            let message = Box::new(data[message_start..].to_vec());
-
-            return Ok(Packet::AuthMessage {
-                tag,
-                auth_header,
-                message,
-            });
+            return Packet::decode_auth_header(tag, data, rlp_length);
         }
-
         // the data is unrecognizable or corrupt.
         debug!("Failed identifying message: {:?}", data);
         Err(PacketError::UnknownPacket)
@@ -249,6 +263,16 @@ impl Packet {
             tag,
             auth_tag: rand::random(),
             data,
+        }
+    }
+
+    /// The authentication tag for all packets except WHOAREYOU.
+    pub fn auth_tag(&self) -> Option<&AuthTag> {
+        match &self {
+            Packet::RandomPacket { auth_tag, .. } => Some(auth_tag),
+            Packet::AuthMessage { auth_header, .. } => Some(&auth_header.auth_tag),
+            Packet::Message { auth_tag, .. } => Some(auth_tag),
+            Packet::WhoAreYou { .. } => None,
         }
     }
 }

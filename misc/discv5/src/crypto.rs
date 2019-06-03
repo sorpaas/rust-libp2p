@@ -6,9 +6,7 @@
 /// encryption and key-derivation algorithms. Future versions may abstract some of these to allow
 /// of different algorithms.
 use crate::error::Discv5Error;
-use crate::packet::{
-    AuthHeader, AuthResponse, AuthTag, NodeId, Nonce, Packet, Tag, NODE_ID_LENGTH,
-};
+use crate::packet::{AuthHeader, AuthResponse, AuthTag, NodeId, Nonce, Tag, NODE_ID_LENGTH};
 use enr::Enr;
 use hkdf::Hkdf;
 use lazy_static::lazy_static;
@@ -19,6 +17,7 @@ use sha2::Sha256;
 
 const INFO_LENGTH: usize = 26 + 2 * NODE_ID_LENGTH;
 const KEY_LENGTH: usize = 16;
+const KEY_AGREEMENT_STRING: &'static str = "discovery v5 key agreement";
 
 type Key = [u8; KEY_LENGTH];
 
@@ -91,7 +90,7 @@ fn derive_key(
     id_nonce: &Nonce,
 ) -> Result<(Key, Key, Key), Discv5Error> {
     let mut info = [0u8; INFO_LENGTH];
-    info[0..26].copy_from_slice(b"discovery v5 key agreement");
+    info[0..26].copy_from_slice(KEY_AGREEMENT_STRING.as_bytes());
     info[26..26 + NODE_ID_LENGTH].copy_from_slice(first_id);
     info[26 + NODE_ID_LENGTH..].copy_from_slice(second_id);
 
@@ -146,21 +145,15 @@ pub fn derive_keys_from_pubkey(
     derive_key(&secret, remote_id, local_id, id_nonce)
 }
 
-pub fn generate_nonce(id_nonce: Nonce) -> Vec<u8> {
-    let mut nonce = b"discovery-id-nonce".to_vec();
-    nonce.append(&mut id_nonce.to_vec());
-    nonce
-}
-
 /// Verifies the encoding and nonce signature given in the authentication header. If
 /// the header contains an updated ENR, it is returned.
 #[inline]
 pub fn verify_authentication_header(
     auth_resp_key: &Key,
-    id_nonce: Nonce,
+    generated_nonce: &[u8],
     header: &AuthHeader,
     tag: &Tag,
-    remote_enr: &Enr,
+    remote_public_key: &PublicKey,
 ) -> Result<Option<Enr>, Discv5Error> {
     if header.auth_scheme_name != "gsm" {
         return Err(Discv5Error::Custom("Invalid authentication scheme".into()));
@@ -172,9 +165,7 @@ pub fn verify_authentication_header(
         .map_err(|_| Discv5Error::Custom("Invalid auth response format"))?;
 
     // verify the nonce signature
-    let remote_pubkey = remote_enr.public_key();
-    let nonce = generate_nonce(id_nonce);
-    if !remote_pubkey.verify(&nonce, &auth_response.signature) {
+    if !remote_public_key.verify(&generated_nonce, &auth_response.signature) {
         return Err(Discv5Error::InvalidSignature);
     }
 
@@ -215,8 +206,8 @@ pub fn encrypt_with_header(
     message: &[u8],
     ephem_pubkey: &[u8],
     tag: &Tag,
-) -> Result<Packet, Discv5Error> {
-    let (ciphertext, _) = encrypt_message(auth_resp_key, Some([0u8; 12]), auth_pt, tag)?;
+) -> Result<(AuthHeader, Vec<u8>), Discv5Error> {
+    let ciphertext = encrypt_message(auth_resp_key, [0u8; 12], auth_pt, tag)?;
 
     // get the rlp_encoded auth_header
     let auth_tag: [u8; 12] = rand::random();
@@ -225,31 +216,23 @@ pub fn encrypt_with_header(
     let mut auth_data = tag.to_vec();
     auth_data.append(&mut auth_header.encode());
 
-    let (message, _) = encrypt_message(encryption_key, Some(auth_tag), message, &auth_data)?;
+    let ciphertext = encrypt_message(encryption_key, auth_tag, message, &auth_data)?;
 
-    Ok(Packet::AuthMessage {
-        tag: tag.clone(),
-        auth_header,
-        message: Box::new(message),
-    })
+    Ok((auth_header, ciphertext))
 }
 
 pub fn encrypt_message(
     key: &Key,
-    mut nonce: Option<AuthTag>,
+    nonce: AuthTag,
     message: &[u8],
     aad: &[u8],
-) -> Result<(Vec<u8>, AuthTag), Discv5Error> {
-    if nonce.is_none() {
-        nonce = Some(rand::random());
-    }
-
+) -> Result<Vec<u8>, Discv5Error> {
     //let auth_tag: [u8; 12] = rand::random();
     let mut mac: [u8; 16] = Default::default();
     let mut msg_cipher = encrypt_aead(
         Cipher::aes_128_gcm(),
         key,
-        Some(&nonce.expect("has a value")),
+        Some(&nonce),
         aad,
         message,
         &mut mac,
@@ -258,7 +241,7 @@ pub fn encrypt_message(
 
     // concat the ciphertext with the MAC
     msg_cipher.append(&mut mac.to_vec());
-    Ok((msg_cipher, nonce.expect("has a value")))
+    Ok(msg_cipher)
 }
 
 #[cfg(test)]
@@ -297,13 +280,14 @@ mod tests {
 
     #[test]
     fn encrypt_decrypt() {
-        let tag: AuthTag = rand::random();
+        let tag: Tag = rand::random();
         let msg: Vec<u8> = vec![1, 2, 3, 4, 5, 6];
         let key: Key = rand::random();
+        let nonce: AuthTag = rand::random();
 
-        let (cipher, auth_tag) = encrypt_message(&key, None, &msg, &tag).unwrap();
+        let cipher = encrypt_message(&key, nonce, &msg, &tag).unwrap();
 
-        let plain_text = decrypt_message(&key, auth_tag, &cipher, &tag).unwrap();
+        let plain_text = decrypt_message(&key, nonce, &cipher, &tag).unwrap();
 
         assert_eq!(plain_text, msg);
     }

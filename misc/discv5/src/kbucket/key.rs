@@ -18,8 +18,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use crate::packet::NodeId;
 use bigint::U256;
-use enr::Enr;
 use libp2p_core::PeerId;
 use multihash::Multihash;
 use sha2::{
@@ -69,6 +69,11 @@ impl<T> Key<T> {
         Key { preimage, hash }
     }
 
+    /// Construct a new `Key` by providing the raw 32 byte hash.
+    pub fn new_raw(preimage: T, hash: GenericArray<u8, U32>) -> Key<T> {
+        Key { preimage, hash }
+    }
+
     /// Borrows the preimage of the key.
     pub fn preimage(&self) -> &T {
         &self.preimage
@@ -103,11 +108,11 @@ impl From<PeerId> for Key<PeerId> {
     }
 }
 
-impl From<Enr> for Key<Enr> {
-    fn from(enr: Enr) -> Self {
+impl From<NodeId> for Key<NodeId> {
+    fn from(node_id: NodeId) -> Self {
         Key {
-            preimage: enr.clone(),
-            hash: *GenericArray::from_slice(&enr.node_id),
+            preimage: node_id.clone(),
+            hash: *GenericArray::from_slice(&node_id),
         }
     }
 }
