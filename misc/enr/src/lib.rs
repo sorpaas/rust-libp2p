@@ -13,9 +13,11 @@ use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 
-use libp2p_core::identity::rsa;
-use libp2p_core::identity::secp256k1 as libp2p_secp256k1;
-use libp2p_core::PeerId;
+use libp2p_core::{
+    identity::{rsa, secp256k1 as libp2p_secp256k1},
+    multiaddr::{Multiaddr, Protocol},
+    PeerId,
+};
 
 const MAX_ENR_SIZE: usize = 300;
 
@@ -39,6 +41,27 @@ impl Enr {
     /// The libp2p PeerId for the record.
     pub fn peer_id(&self) -> PeerId {
         self.public_key().into()
+    }
+
+    /// Returns a vector of multiaddrs if the ENR has an `ip` and either a `tcp` or `udp`. The
+    /// vector remains empty if these fields are not defined.
+    /// field.
+    pub fn multiaddr(&self) -> Vec<Multiaddr> {
+        let mut multiaddrs: Vec<Multiaddr> = Vec::new();
+        if let Some(ip) = self.ip() {
+            if let Some(udp) = self.udp() {
+                let mut multiaddr: Multiaddr = ip.into();
+                multiaddr.push(Protocol::Udp(udp));
+                multiaddrs.push(multiaddr);
+            }
+
+            if let Some(tcp) = self.tcp() {
+                let mut multiaddr: Multiaddr = ip.into();
+                multiaddr.push(Protocol::Tcp(tcp));
+                multiaddrs.push(multiaddr);
+            }
+        }
+        multiaddrs
     }
 
     /// Adds a key/value to the ENR record. A keypair is required to re-sign the record once
@@ -167,18 +190,6 @@ impl Enr {
                 let mut udp = [0u8; 2];
                 udp[2 - udp_bytes.len()..].copy_from_slice(udp_bytes);
                 return Some(u16::from_be_bytes(udp));
-            }
-        }
-        None
-    }
-
-    /// Returns the SocketAddr of the ENR if an IP and port are defined.
-    pub fn socket(&self) -> Option<SocketAddr> {
-        if let Some(ip) = self.ip() {
-            if let Some(tcp) = self.tcp() {
-                return Some(SocketAddr::new(ip, tcp));
-            } else if let Some(udp) = self.udp() {
-                return Some(SocketAddr::new(ip, udp));
             }
         }
         None
@@ -568,6 +579,31 @@ mod tests {
         assert_eq!(
             enr.public_key().into_protobuf_encoding(),
             key.public().into_protobuf_encoding()
+        );
+    }
+
+    #[test]
+    fn test_multiaddr() {
+        let key = Keypair::generate_secp256k1();
+        let tcp = 30303;
+        let udp = 30304;
+        let ip = Ipv4Addr::new(10, 0, 0, 1);
+
+        let enr = {
+            let mut builder = EnrBuilder::new();
+            builder.ip(ip.into());
+            builder.tcp(tcp);
+            builder.udp(udp);
+            builder.build(&key).unwrap()
+        };
+
+        assert_eq!(
+            enr.multiaddr()[0],
+            "/ip4/10.0.0.1/udp/30304".parse().unwrap()
+        );
+        assert_eq!(
+            enr.multiaddr()[1],
+            "/ip4/10.0.0.1/tcp/30303".parse().unwrap()
         );
     }
 }
