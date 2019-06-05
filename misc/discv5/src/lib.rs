@@ -4,15 +4,15 @@
 //! peer-to-peer network.
 
 // mod behaviour;
-pub mod message;
-pub mod packet;
-
-//mod behaviour;
+mod behaviour;
 mod crypto;
 mod error;
-//mod kbucket;
+mod kbucket;
+pub(crate) mod packet;
+mod query;
+pub(crate) mod rpc;
 mod service;
 mod session;
-pub mod session_service;
+pub(crate) mod session_service;
 
 pub use error::Discv5Error;

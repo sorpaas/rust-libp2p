@@ -1,11 +1,13 @@
+use self::query_info::{QueryInfo, QueryType};
 use crate::kbucket::{self, KBucketsTable, NodeStatus};
 use crate::packet::NodeId;
-use crate::query::{QueryConfig, QueryState, QueryStatePollOut};
-use crate::session::SessionService;
+use crate::query::Query; //QueryPollOut};
+use crate::rpc;
+use crate::session_service::SessionService;
 use enr::Enr;
 use fnv::{FnvHashMap, FnvHashSet};
 use futures::prelude::*;
-use futures::{prelude::*, stream};
+//use futures::{prelude::*, stream};
 use libp2p_core::identity::Keypair;
 use libp2p_core::swarm::{
     ConnectedPoint, NetworkBehaviour, NetworkBehaviourAction, PollParameters,
@@ -16,20 +18,16 @@ use libp2p_core::{
 };
 use smallvec::SmallVec;
 use std::io;
-use std::{borrow::Cow, error, marker::PhantomData, time::Duration};
+use std::{marker::PhantomData, time::Duration};
 use tokio_io::{AsyncRead, AsyncWrite};
 
 mod query_info;
 
-/// The number of results to return from a query. Defaults to the maximum number
-/// of entries in a single k-bucket, i.e. the `k` parameter.
-const BUCKET_SIZE: usize = 16;
-/// The total time before marking an RPC request as failed.
-const RPC_TIMEOUT: usize = 8;
-/// The number of times to re-send an RPC request within the timeout.
-const RPC_RETRIES: usize = 2;
-
 type QueryId = usize;
+type RpcId = u64;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RpcRequest(RpcId, NodeId);
 
 pub struct Discv5<TSubstream> {
     events: SmallVec<[Discv5Event; 32]>,
@@ -38,11 +36,15 @@ pub struct Discv5<TSubstream> {
 
     /// All the iterative queries we are currently performing, with their ID. The last parameter
     /// is the list of accumulated providers for `GET_PROVIDERS` queries.
-    active_queries: FnvHashMap<QueryId, QueryState<QueryInfo, NodeId>>,
+    active_queries: FnvHashMap<QueryId, Query<QueryInfo, NodeId>>,
+
+    active_rpc_requests: FnvHashMap<RpcRequest, QueryId>,
 
     /// `α` in the Kademlia reference papers. Designates the maximum number of queries that we
     /// perform in parallel.
     parallelism: usize,
+
+    bucket_size: usize,
 
     /// List of peers we have established sessions with.
     connected_peers: FnvHashSet<NodeId>,
@@ -73,15 +75,11 @@ impl<TSubstream> Discv5<TSubstream> {
             events: SmallVec::new(),
             kbuckets: KBucketsTable::new(enr.node_id.into(), Duration::from_secs(60)),
             active_queries: Default::default(),
-            //pending_rpcs: SmallVec::with_capacity(parallelism),
-            //next_query_id: QueryId(0),
-            //values_providers: FnvHashMap::default(),
-            //providing_keys: FnvHashSet::default(),
-            //refresh_add_providers: Interval::new_interval(Duration::from_secs(60)).fuse(),     // TODO: constant
+            active_rpc_requests: Default::default(),
+            connected_peers: Default::default(),
+            bucket_size: kbucket::MAX_NODES_PER_BUCKET,
+            next_query_id: 0,
             parallelism,
-            num_results: kbucket::MAX_NODES_PER_BUCKET,
-            // rpc_timeout: Duration::from_secs(8),
-            //add_provider: SmallVec::new(),
             service,
             marker: PhantomData,
         })
@@ -90,7 +88,7 @@ impl<TSubstream> Discv5<TSubstream> {
     /// Adds a known ENR of a peer participating in Discv5 to the
     /// routing table.
     ///
-    /// This allows prepopulating the Kademlia routing table with known
+    /// This allows pre-populating the Kademlia routing table with known
     /// addresses, so that they can be used immediately in following DHT
     /// operations involving one of these peers, without having to dial
     /// them upfront.
@@ -114,7 +112,7 @@ impl<TSubstream> Discv5<TSubstream> {
                     }
                     kbucket::InsertResult::Full => (),
                     kbucket::InsertResult::Pending { disconnected } => {
-                        // TODO: Establish connection.  Look up known addresses
+                        // TODO: Establish connection.  Look up known addresses. Call PING
                     }
                 }
                 return;
@@ -133,37 +131,211 @@ impl<TSubstream> Discv5<TSubstream> {
     ///
     /// This will eventually produce an event containing the nodes of the DHT closest to the
     /// requested `PeerId`.
-    pub fn find_node(&mut self, peer_id: PeerId) {
-        self.start_query(QueryInfoInner::FindPeer(peer_id));
+    pub fn find_node(&mut self, node_id: NodeId) {
+        self.start_query(QueryType::FindNode(node_id));
+    }
+
+    fn send_rpc(&mut self, dst_enr: &Enr, query_info: QueryInfo, query_id: QueryId) {
+        let dst_id = dst_enr.node_id;
+        // Generate a random rpc_id which is matched per node id
+        let id: u64 = rand::random();
+
+        // build a ProtocolMessage from a QueryInfo
+        let body = match &query_info.query_type {
+            QueryType::FindNode(node_id) => {
+                let distance = match self
+                    .kbuckets
+                    .local_key()
+                    .log2_distance(&dst_id.clone().into())
+                {
+                    Some(v) => v,
+                    None => {
+                        //dst node is local_key
+                        //TODO: Inject rpc failure
+                        return;
+                    }
+                };
+
+                rpc::Request::FindNode { distance }
+            }
+            _ => {
+                panic!("Not implemented");
+            }
+        };
+
+        let req = RpcRequest(id.clone(), dst_id);
+        let body = rpc::RpcType::Request(body);
+
+        self.active_rpc_requests.insert(req.clone(), query_id);
+        match self
+            .service
+            .send_message(dst_enr, rpc::ProtocolMessage { id, body })
+        {
+            Ok(_) => {}
+            Err(_) => {
+                self.active_rpc_requests.remove(&req);
+                // TODO: inject rpc failure
+            }
+        }
     }
 
     /// Internal function that starts a query.
-    fn start_query(&mut self, target: QueryInfoInner) {
+    fn start_query(&mut self, query_type: QueryType) {
         let query_id = self.next_query_id;
-        self.next_query_id.0 += 1;
+        self.next_query_id += 1;
 
         let target = QueryInfo {
-            inner: target,
-            untrusted_enrs: Default::default(),
+            query_type: query_type,
+            untrusted_addresses: Default::default(),
         };
 
-        let target_key = kbucket::Key::from(target.clone());
+        // How many times to call the rpc per node.
+        // FINDNODE requires multiple iterations
+        let query_iterations = target.iterations();
+
+        let target_key: kbucket::Key<QueryInfo> = target.into();
 
         let known_closest_peers = self
             .kbuckets
             .closest_keys(&target_key)
-            .take(self.num_results);
+            .take(self.bucket_size);
 
         self.active_queries.insert(
             query_id,
-            QueryState::new(QueryConfig {
+            Query::new(
                 target,
-                parallelism: self.parallelism,
-                num_results: self.num_results,
-                rpc_timeout: self.rpc_timeout,
+                self.parallelism,
+                query_iterations,
+                self.bucket_size,
                 known_closest_peers,
-            }),
+            ),
         );
+    }
+
+    /// Processes discovered peers from a query.
+    fn discovered<'a, I>(&mut self, query_id: &QueryId, source: &NodeId, peers: I)
+    where
+        I: Iterator<Item = &'a DiscoveredPeer> + Clone,
+    {
+        let local_id = self.kbuckets.local_key().preimage().clone();
+        let others_iter = peers.filter(|p| p.enr.node_id != local_id);
+
+        for peer in others_iter.clone() {
+            self.events.push(Discv5Event::Discovered {
+                enr_id: peer.enr.node_id.clone(),
+                addresses: peer.enr.multiaddr().clone(),
+                ty: peer.connection_type,
+            });
+        }
+
+        if let Some(query) = self.active_queries.get_mut(query_id) {
+            for peer in others_iter.clone() {
+                query.target_mut().untrusted_addresses.insert(
+                    peer.enr.node_id.clone(),
+                    peer.enr.multiaddr().iter().cloned().collect(),
+                );
+            }
+            query.inject_rpc_result(source, others_iter.cloned().map(|kp| kp.enr.node_id))
+        }
+    }
+
+    /// Returns nodes in a specific k-bucket defined by the distance parameter. This is run in the
+    /// context of a `source` peer which is not included in the result.
+    fn get_nodes_by_distance<T: Clone>(
+        &mut self,
+        target: &kbucket::Key<T>,
+        distance: u64,
+        source: &NodeId,
+    ) -> Vec<DiscoveredPeer> {
+        let local_key = self.kbuckets.local_key();
+
+        self.kbuckets
+            .closest(target)
+            .filter(|e| e.node.key.preimage() != source)
+            .take_while(|e| local_key.log2_distance(&e.node.key) == Some(distance))
+            .map(DiscoveredPeer::from)
+            .collect()
+    }
+
+    /// Update the connection status of a peer in the Kademlia routing table.
+    fn connection_updated(&mut self, node_id: NodeId, enr: Option<Enr>, new_status: NodeStatus) {
+        let key = kbucket::Key::new(node_id.clone());
+        match self.kbuckets.entry(&key) {
+            kbucket::Entry::Present(mut entry, old_status) => {
+                if let Some(enr) = enr {
+                    *entry.value() = enr;
+                }
+                if old_status != new_status {
+                    entry.update(new_status);
+                }
+            }
+
+            kbucket::Entry::Pending(mut entry, old_status) => {
+                if let Some(enr) = enr {
+                    *entry.value() = enr;
+                }
+                if old_status != new_status {
+                    entry.update(new_status);
+                }
+            }
+
+            kbucket::Entry::Absent(entry) => {
+                if new_status == NodeStatus::Connected {
+                    // Note: If an ENR is not provided, no record is added
+                    debug_assert!(enr.is_some());
+                    if let Some(enr) = enr {
+                        match entry.insert(enr, new_status) {
+                            kbucket::InsertResult::Inserted => {
+                                let event = Discv5Event::NodeInserted {
+                                    node_id: node_id.clone(),
+                                    replaced: None,
+                                };
+                                self.events.push(event);
+                            }
+                            kbucket::InsertResult::Full => (),
+                            kbucket::InsertResult::Pending { disconnected } => {
+                                debug_assert!(!self
+                                    .connected_peers
+                                    .contains(disconnected.preimage()));
+
+                                // TODO: Connect to peer, disconnected.into_preimage().
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Wrapper around a discovered peer that associates a connection type to peer's ENR.
+#[derive(Debug, Clone)]
+struct DiscoveredPeer {
+    enr: Enr,
+    connection_type: ConnectionType,
+}
+
+/// The connection type associated with a discovered peer.
+#[derive(Debug, Clone)]
+enum ConnectionType {
+    /// A session has been established with the peer.
+    Connected,
+    /// An attempt to establish a session failed.
+    CouldNotConnect,
+    /// No session has been attempted.
+    NotConnected,
+}
+
+impl From<kbucket::EntryView<NodeId, Enr>> for DiscoveredPeer {
+    fn from(e: kbucket::EntryView<NodeId, Enr>) -> DiscoveredPeer {
+        DiscoveredPeer {
+            enr: e.node.value,
+            connection_type: match e.status {
+                NodeStatus::Connected => ConnectionType::Connected,
+                NodeStatus::Disconnected => ConnectionType::NotConnected,
+            },
+        }
     }
 }
 
@@ -211,31 +383,17 @@ where
 #[derive(Debug)]
 pub enum Discv5Event {
     /// Discovered nodes through discv5.
-    Discovered(u64),
+    Discovered {
+        enr_id: NodeId,
+        addresses: Vec<Multiaddr>,
+        ty: ConnectionType,
+    },
     EnrAdded {
         enr: Enr,
         replaced: Option<Enr>,
     },
-}
-
-/// Information about a query.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct QueryInfo {
-    /// What we are querying and why.
-    inner: QueryInfoInner,
-    /// Temporary addresses used when trying to reach nodes.
-    untrusted_addresses: FnvHashMap<PeerId, SmallVec<[Multiaddr; 8]>>,
-}
-
-/// Additional information about the query.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum QueryInfoInner {
-    /// The query was created for the Kademlia initialization process.
-    Initialization {
-        /// Hash we're targetting to insert ourselves in the k-buckets.
-        target: NodeId,
+    NodeInserted {
+        node_id: NodeId,
+        replaced: Option<NodeId>,
     },
-
-    /// The user requested a `FIND_PEER` query to be performed. It should be reported when finished.
-    FindPeer(NodeId),
 }

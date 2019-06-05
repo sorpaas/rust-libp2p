@@ -90,6 +90,14 @@ impl<T> Key<T> {
         let b = U256::from(other.hash.as_ref());
         Distance(a ^ b)
     }
+
+    // Used in the FINDNODE query outside of the k-bucket implementation.
+    /// Computes the integer log-2 distance (rounded down) between two keys, assuming a 256-bit
+    /// key. The output returns None if the key's are identical.
+    pub fn log2_distance<U>(&self, other: &Key<U>) -> Option<u64> {
+        let xor_dist = self.distance(other);
+        (256 - xor_dist.0.leading_zeros() as u64).checked_sub(1)
+    }
 }
 
 impl From<Multihash> for Key<Multihash> {

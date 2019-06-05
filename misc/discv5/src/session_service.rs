@@ -2,7 +2,8 @@ use super::packet::{
     AuthHeader, AuthResponse, AuthTag, NodeId, Nonce, Packet, Tag, MAGIC_LENGTH, TAG_LENGTH,
 };
 use super::service::Discv5Service;
-use crate::message::ProtocolMessage;
+use crate::error::Discv5Error;
+use crate::rpc::ProtocolMessage;
 use crate::session::{Session, SessionStatus};
 use enr::Enr;
 use fnv::FnvHashMap;
@@ -91,13 +92,21 @@ impl SessionService {
 
     /// Sends a message to a node given the nodes ENR. This function will handle establishing a
     /// session and retrying requests on timeout.
-    pub fn send_message(&mut self, dst_enr: &Enr, message: ProtocolMessage) -> Result<(), ()> {
+    pub fn send_message(
+        &mut self,
+        dst_enr: &Enr,
+        message: ProtocolMessage,
+    ) -> Result<(), Discv5Error> {
         // check for an established session
         let dst_id = dst_enr.node_id;
 
-        let dst = dst_enr
-            .socket()
-            .ok_or_else(|| warn!("Could not send message. ENR has no ip/port: {}", dst_enr))?;
+        let dst = dst_enr.udp_socket().ok_or_else(|| {
+            warn!(
+                "Could not send message. ENR has no ip and udp port: {}",
+                dst_enr
+            );
+            Discv5Error::InvalidEnr
+        })?;
 
         let session = match self.sessions.get(&dst_id) {
             Some(s) if s.established() => s,
@@ -134,7 +143,10 @@ impl SessionService {
         // session is established, encrypt the message and send
         let packet = session
             .encrypt_message(self.tag(&dst_id), &message.encode())
-            .map_err(|_| error!("Failed to encrypt message"))?;
+            .map_err(|e| {
+                error!("Failed to encrypt message");
+                e
+            })?;
 
         self.send_packet(dst, dst_enr, packet);
         Ok(())

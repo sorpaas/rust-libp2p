@@ -195,6 +195,17 @@ impl Enr {
         None
     }
 
+    /// Returns a socket (based on the udp port), if IP and udp fields are specified.
+    // This is primarily used for discv5 for which this library was built.
+    pub fn udp_socket(&self) -> Option<SocketAddr> {
+        if let Some(ip) = self.ip() {
+            if let Some(udp) = self.udp() {
+                return Some(SocketAddr::new(ip, udp));
+            }
+        }
+        None
+    }
+
     pub fn signature(&self) -> &[u8] {
         &self.signature
     }
