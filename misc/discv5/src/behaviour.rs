@@ -1,7 +1,7 @@
 use self::query_info::{QueryInfo, QueryType};
 use crate::kbucket::{self, KBucketsTable, NodeStatus};
 use crate::packet::NodeId;
-use crate::query::Query; //QueryPollOut};
+use crate::query::{Query, QueryConfig};
 use crate::rpc;
 use crate::session_service::SessionService;
 use enr::Enr;
@@ -30,6 +30,13 @@ type RpcId = u64;
 struct RpcRequest(RpcId, NodeId);
 
 pub struct Discv5<TSubstream> {
+    /// The local ENR for this node.
+    local_enr: Enr,
+
+    /// The keypair for the current node. Required to sign our local ENR when our address is
+    /// updated.
+    keypair: Keypair,
+
     events: SmallVec<[Discv5Event; 32]>,
     /// Storage of the ENR record for each node.
     kbuckets: KBucketsTable<NodeId, Enr>,
@@ -40,14 +47,11 @@ pub struct Discv5<TSubstream> {
 
     active_rpc_requests: FnvHashMap<RpcRequest, QueryId>,
 
-    /// `α` in the Kademlia reference papers. Designates the maximum number of queries that we
-    /// perform in parallel.
-    parallelism: usize,
-
-    bucket_size: usize,
-
     /// List of peers we have established sessions with.
     connected_peers: FnvHashSet<NodeId>,
+
+    /// The configuration for iterative queries.
+    query_config: QueryConfig,
 
     /// Identifier for the next query that we start.
     next_query_id: QueryId,
@@ -62,24 +66,24 @@ pub struct Discv5<TSubstream> {
 impl<TSubstream> Discv5<TSubstream> {
     /// Builds the `Discv5` main struct.
     ///
-    /// `enr` is the `ENR` representing the local node. This contains node identifying information, such
+    /// `local_enr` is the `ENR` representing the local node. This contains node identifying information, such
     /// as IP addresses and ports which we wish to broadcast to other nodes via this discovery
     /// mechanism. The `ip` and `port` fields of the ENR will determine the ip/port that the discv5
     /// `Service` will listen on.
-    pub fn new(enr: Enr, keypair: Keypair) -> io::Result<Self> {
-        let parallelism = 3;
-
-        let service = SessionService::new(enr.clone(), keypair)?;
+    pub fn new(local_enr: Enr, keypair: Keypair) -> io::Result<Self> {
+        let service = SessionService::new(local_enr.clone(), keypair.clone())?;
+        let query_config = QueryConfig::default();
 
         Ok(Discv5 {
+            local_enr: local_enr.clone(),
+            keypair,
             events: SmallVec::new(),
-            kbuckets: KBucketsTable::new(enr.node_id.into(), Duration::from_secs(60)),
+            kbuckets: KBucketsTable::new(local_enr.node_id.into(), Duration::from_secs(60)),
             active_queries: Default::default(),
             active_rpc_requests: Default::default(),
             connected_peers: Default::default(),
-            bucket_size: kbucket::MAX_NODES_PER_BUCKET,
             next_query_id: 0,
-            parallelism,
+            query_config,
             service,
             marker: PhantomData,
         })
@@ -151,7 +155,7 @@ impl<TSubstream> Discv5<TSubstream> {
                     Some(v) => v,
                     None => {
                         //dst node is local_key
-                        //TODO: Inject rpc failure
+                        //TODO: Inject on_failure
                         return;
                     }
                 };
@@ -174,7 +178,7 @@ impl<TSubstream> Discv5<TSubstream> {
             Ok(_) => {}
             Err(_) => {
                 self.active_rpc_requests.remove(&req);
-                // TODO: inject rpc failure
+                // TODO: inject on_failure
             }
         }
     }
@@ -193,23 +197,17 @@ impl<TSubstream> Discv5<TSubstream> {
         // FINDNODE requires multiple iterations
         let query_iterations = target.iterations();
 
-        let target_key: kbucket::Key<QueryInfo> = target.into();
+        let target_key: kbucket::Key<QueryInfo> = target.clone().into();
 
-        let known_closest_peers = self
-            .kbuckets
-            .closest_keys(&target_key)
-            .take(self.bucket_size);
-
-        self.active_queries.insert(
-            query_id,
-            Query::new(
-                target,
-                self.parallelism,
-                query_iterations,
-                self.bucket_size,
-                known_closest_peers,
-            ),
+        let known_closest_peers = self.kbuckets.closest_keys(&target_key);
+        let query = Query::with_config(
+            self.query_config.clone(),
+            target,
+            known_closest_peers,
+            query_iterations,
         );
+
+        self.active_queries.insert(query_id, query);
     }
 
     /// Processes discovered peers from a query.
@@ -224,7 +222,7 @@ impl<TSubstream> Discv5<TSubstream> {
             self.events.push(Discv5Event::Discovered {
                 enr_id: peer.enr.node_id.clone(),
                 addresses: peer.enr.multiaddr().clone(),
-                ty: peer.connection_type,
+                ty: peer.connection_type.clone(),
             });
         }
 
@@ -235,7 +233,7 @@ impl<TSubstream> Discv5<TSubstream> {
                     peer.enr.multiaddr().iter().cloned().collect(),
                 );
             }
-            query.inject_rpc_result(source, others_iter.cloned().map(|kp| kp.enr.node_id))
+            query.on_success(source, others_iter.cloned().map(|kp| kp.enr.node_id))
         }
     }
 
@@ -247,7 +245,7 @@ impl<TSubstream> Discv5<TSubstream> {
         distance: u64,
         source: &NodeId,
     ) -> Vec<DiscoveredPeer> {
-        let local_key = self.kbuckets.local_key();
+        let local_key = self.kbuckets.local_key().clone();
 
         self.kbuckets
             .closest(target)
@@ -318,7 +316,7 @@ struct DiscoveredPeer {
 
 /// The connection type associated with a discovered peer.
 #[derive(Debug, Clone)]
-enum ConnectionType {
+pub enum ConnectionType {
     /// A session has been established with the peer.
     Connected,
     /// An attempt to establish a session failed.
