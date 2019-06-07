@@ -83,9 +83,9 @@ pub struct QueryResult<TTarget, TClosest> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// The returned peer given as output when the query is in a `[QueryState::Waiting]` state.
-pub struct ReturnPeer<'a, TNodeId> {
+pub struct ReturnPeer<TNodeId> {
     /// The key used to identify the peer.
-    pub peer: &'a TNodeId,
+    pub node_id: TNodeId,
 
     /// The current request iteration of this peer.
     pub iteration: usize,
@@ -93,7 +93,7 @@ pub struct ReturnPeer<'a, TNodeId> {
 
 /// The state of the query reported by [`Query::next`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QueryState<'a, TNodeId> {
+pub enum QueryState<TNodeId> {
     /// The query is waiting for results.
     ///
     /// `Some(peer)` indicates that the query is now waiting for a result
@@ -103,7 +103,7 @@ pub enum QueryState<'a, TNodeId> {
     /// `None` indicates that the query is waiting for results and there is no
     /// new peer to contact, despite the query not being at capacity w.r.t.
     /// the permitted parallelism.
-    Waiting(Option<ReturnPeer<'a, TNodeId>>),
+    Waiting(Option<ReturnPeer<TNodeId>>),
 
     /// The query is waiting for results and is at capacity w.r.t. the
     /// permitted parallelism.
@@ -351,7 +351,7 @@ where
                     peer.state = QueryPeerState::Waiting;
                     self.num_waiting += 1;
                     let return_peer = ReturnPeer {
-                        peer: peer.key.preimage(),
+                        node_id: peer.key.preimage().clone(),
                         iteration: peer.iteration,
                     };
                     return QueryState::Waiting(Some(return_peer));
@@ -388,7 +388,7 @@ where
                         peer.state = QueryPeerState::Waiting;
                         self.num_waiting += 1;
                         let return_peer = ReturnPeer {
-                            peer: peer.key.preimage(),
+                            node_id: peer.key.preimage().clone(),
                             iteration: peer.iteration,
                         };
                         return QueryState::Waiting(Some(return_peer));

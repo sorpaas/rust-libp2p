@@ -2,7 +2,7 @@
 mod tests {
 
     use super::super::*;
-    use crate::message::{Request, RpcType};
+    use crate::rpc::{Request, RpcType};
     use enr::EnrBuilder;
     use libp2p_core::identity::Keypair;
     //use simple_logger;
@@ -67,10 +67,18 @@ mod tests {
                 };
 
                 match message {
-                    SessionMessage::WhoAreYouRequest { src, auth_tag, .. } => {
-                        receiver_service.send_whoareyou(src, &sender_enr, auth_tag);
+                    SessionEvent::WhoAreYouRequest { src, auth_tag, .. } => {
+                        let seq = sender_enr.seq;
+                        let node_id = &sender_enr.node_id;
+                        receiver_service.send_whoareyou(
+                            src,
+                            node_id,
+                            seq,
+                            Some(sender_enr.clone()),
+                            auth_tag,
+                        );
                     }
-                    SessionMessage::Message(message) => {
+                    SessionEvent::Message(message) => {
                         assert_eq!(*message, receiver_send_message);
                         return Ok(Async::Ready(()));
                     }
@@ -150,10 +158,18 @@ mod tests {
                 };
 
                 match message {
-                    SessionMessage::WhoAreYouRequest { src, auth_tag, .. } => {
-                        receiver_service.send_whoareyou(src, &sender_enr, auth_tag);
+                    SessionEvent::WhoAreYouRequest { src, auth_tag, .. } => {
+                        let seq = sender_enr.seq;
+                        let node_id = &sender_enr.node_id;
+                        receiver_service.send_whoareyou(
+                            src,
+                            node_id,
+                            seq,
+                            Some(sender_enr.clone()),
+                            auth_tag,
+                        );
                     }
-                    SessionMessage::Message(message) => {
+                    SessionEvent::Message(message) => {
                         assert_eq!(*message, receiver_send_message);
                         message_count += 1;
                         if message_count == messages_to_send {

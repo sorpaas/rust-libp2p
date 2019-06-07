@@ -11,9 +11,9 @@ const WHOAREYOU_STRING: &'static str = "WHOAREYOU";
 const NONCE_STRING: &'static str = "discovery-id-nonce";
 const SESSION_TIMEOUT: u64 = 30;
 
-// Manually zeroize this struct when dropped
 pub struct Session {
     status: SessionStatus,
+    remote_enr: Option<Enr>,       // can be None for WHOAREYOU sessions.
     ephem_pubkey: Option<Vec<u8>>, // ephemeral key is stored as encoded bytes
     keys: Keys,
     timeout: Option<Instant>,
@@ -44,11 +44,12 @@ pub enum SessionStatus {
 }
 
 impl Session {
-    pub fn new_random(tag: Tag) -> (Self, Packet) {
+    pub fn new_random(tag: Tag, remote_enr: Enr) -> (Self, Packet) {
         let random_packet = Packet::random(tag);
 
         let session = Session {
             status: SessionStatus::RandomSent,
+            remote_enr: Some(remote_enr),
             ephem_pubkey: None,
             keys: Keys::new(),
             timeout: None, // we don't timeout until the session is established
@@ -57,12 +58,18 @@ impl Session {
         (session, random_packet)
     }
 
-    pub fn new_whoareyou(tag: Tag, dst_enr: &Enr, auth_tag: AuthTag) -> (Self, Packet) {
-        // build the who are you packet
+    pub fn new_whoareyou(
+        tag: Tag,
+        node_id: &NodeId,
+        enr_seq: u64,
+        remote_enr: Option<Enr>,
+        auth_tag: AuthTag,
+    ) -> (Self, Packet) {
+        // build the WHOAREYOU packet
         let whoareyou_packet = {
             let magic = {
                 let mut hasher = Sha256::new();
-                hasher.input(dst_enr.node_id);
+                hasher.input(node_id);
                 hasher.input(WHOAREYOU_STRING.as_bytes());
                 let mut magic = [0u8; MAGIC_LENGTH];
                 magic.copy_from_slice(&hasher.result());
@@ -76,12 +83,13 @@ impl Session {
                 magic,
                 token: auth_tag.clone(),
                 id_nonce,
-                enr_seq: dst_enr.seq,
+                enr_seq,
             }
         };
 
         let session = Session {
             status: SessionStatus::WhoAreYouSent,
+            remote_enr,
             ephem_pubkey: None,
             keys: Keys::new(),
             timeout: None, // we don't timeout until the session is established
@@ -93,11 +101,16 @@ impl Session {
     fn generate_keys(
         &mut self,
         local_node_id: &NodeId,
-        remote_enr: &Enr,
         id_nonce: &Nonce,
     ) -> Result<(), Discv5Error> {
         let (encryption_key, decryption_key, auth_resp_key, ephem_pubkey) =
-            crypto::generate_session_keys(local_node_id, remote_enr, id_nonce)?;
+            crypto::generate_session_keys(
+                local_node_id,
+                self.remote_enr
+                    .as_ref()
+                    .expect("Should never be None at this point"),
+                id_nonce,
+            )?;
 
         self.ephem_pubkey = Some(ephem_pubkey);
 
@@ -130,13 +143,12 @@ impl Session {
         &mut self,
         tag: Tag,
         local_node_id: &NodeId,
-        remote_enr: &Enr,
         id_nonce: &Nonce,
         auth_pt: &[u8],
         message: &[u8],
     ) -> Result<Packet, Discv5Error> {
         // generate the session keys
-        self.generate_keys(local_node_id, remote_enr, id_nonce)?;
+        self.generate_keys(local_node_id, id_nonce)?;
 
         // encrypt the message with the newly generated session keys
         let (auth_header, ciphertext) = crypto::encrypt_with_header(
@@ -166,15 +178,16 @@ impl Session {
         tag: Tag,
         local_keypair: &Keypair,
         local_id: &NodeId,
-        src_enr: &Enr,
         id_nonce: Nonce,
         auth_header: &AuthHeader,
     ) -> Result<Option<Enr>, Discv5Error> {
         // generate session keys
+        let remote_enr = self.remote_enr.as_ref().expect("Remote ENR must exist");
+
         let (decryption_key, encryption_key, auth_resp_key) = crypto::derive_keys_from_pubkey(
             local_keypair,
             local_id,
-            &src_enr.node_id,
+            &remote_enr.node_id,
             &id_nonce,
             &auth_header.ephemeral_pubkey,
         )?;
@@ -185,7 +198,7 @@ impl Session {
             &Session::generate_nonce(id_nonce),
             auth_header,
             &tag,
-            &src_enr.public_key(),
+            &remote_enr.public_key(),
         )?;
 
         // session has been established
@@ -217,6 +230,14 @@ impl Session {
 
     pub fn status(&self) -> SessionStatus {
         self.status
+    }
+
+    pub fn update_enr(&mut self, enr: Enr) {
+        self.remote_enr = Some(enr);
+    }
+
+    pub fn remote_enr(&self) -> &Option<Enr> {
+        &self.remote_enr
     }
 
     pub fn established(&self) -> bool {

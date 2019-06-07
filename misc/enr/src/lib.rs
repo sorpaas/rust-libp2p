@@ -22,7 +22,7 @@ use libp2p_core::{
 const MAX_ENR_SIZE: usize = 300;
 
 /// ENR Record
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Enr {
     /// ENR sequence number.
     pub seq: u64,
