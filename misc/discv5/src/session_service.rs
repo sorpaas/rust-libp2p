@@ -173,6 +173,7 @@ impl SessionService {
     /// This is called in response to a SessionMessage::WhoAreYou event. The protocol finds the
     /// highest known ENR then calls this function to send a WHOAREYOU packet.
     //TODO: Comment why remote_enr
+    //TODO: Create a more elegant API
     pub fn send_whoareyou(
         &mut self,
         dst: SocketAddr,
@@ -369,25 +370,31 @@ impl SessionService {
 
         // verify the updated_enr. Ensure that if an ENR is required for this session, that it is
         // provided
-        if session.remote_enr().is_none() {
-            // an ENR is required
 
-            // add an event if we have an updated ENR
-            if let Some(enr) = updated_enr {
+        // Verify the ENR update
+        if let Some(enr) = updated_enr {
+            if let Some(remote_enr) = session.remote_enr() {
                 // verify the enr-seq number
+                if remote_enr.seq < enr.seq {
+                    session.update_enr(enr.clone());
+                    self.events
+                        .push_back(SessionEvent::UpdatedEnr(Box::new(enr)));
+                } // ignore ENR's that have a lower seq number
+            } else if session.remote_enr().is_none() {
+                // update the ENR
                 session.update_enr(enr.clone());
                 self.events
                     .push_back(SessionEvent::UpdatedEnr(Box::new(enr)));
-            } else {
-                // a required ENR was not provided
-                // drop the session
-                warn!(
-                    "Node did not provide an ENR. Dropping session. Node: {:?}",
-                    src_id
-                );
-                self.sessions.remove(&src_id);
-                return Err(());
             }
+        } else if session.remote_enr().is_none() {
+            // a required ENR was not provided
+            // drop the session and exit.
+            warn!(
+                "Node did not provide a required ENR. Dropping session. Node: {:?}",
+                src_id
+            );
+            self.sessions.remove(&src_id);
+            return Err(());
         }
 
         // decrypt the message
@@ -556,16 +563,16 @@ impl SessionService {
                         if let Some(pending_messages) = self.pending_messages.remove(&req.node_id) {
                             for msg in pending_messages {
                                 self.events.push_back(SessionEvent::RequestFailed(
-                                    msg.id,
                                     node_id.clone(),
+                                    msg.id,
                                 ));
                             }
                         }
                     }
                     Packet::AuthMessage { .. } | Packet::Message { .. } => {
                         self.events.push_back(SessionEvent::RequestFailed(
-                            req.rpc_id.expect("Auth messages have an rpc id"),
                             node_id,
+                            req.rpc_id.expect("Auth messages have an rpc id"),
                         ));
                     }
                     Packet::WhoAreYou { .. } => {
@@ -581,7 +588,7 @@ impl SessionService {
                 if let Some(pending_messages) = self.pending_messages.remove(node_id) {
                     for msg in pending_messages {
                         self.events
-                            .push_back(SessionEvent::RequestFailed(msg.id, node_id.clone()));
+                            .push_back(SessionEvent::RequestFailed(node_id.clone(), msg.id));
                     }
                 }
             }
@@ -694,7 +701,7 @@ pub enum SessionEvent {
         src_id: NodeId,
         auth_tag: AuthTag,
     },
-    RequestFailed(u64, NodeId),
+    RequestFailed(NodeId, u64),
 }
 
 #[derive(Debug, Clone)]

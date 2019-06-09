@@ -386,6 +386,23 @@ impl<TSubstream> Discv5<TSubstream> {
         }
         None
     }
+
+    // TODO: split up functionality
+    fn incomming_rpc(&mut self, msg: rpc::ProtocolMessage) {
+        match msg.body {
+            rpc::RpcType::Request(req) => {
+                match req {
+                    rpc::Request::FindNode { distance } => {
+                        //self.get_nodes_by_distance(
+                    }
+                    _ => {} //TODO: Implement all RPC methods
+                }
+            }
+            rpc::RpcType::Response(res) => {
+                // verify we know of the rpc_id
+            }
+        }
+    }
 }
 
 /// Wrapper around a discovered peer that associates a connection type to peer's ENR.
@@ -501,14 +518,36 @@ where
             loop {
                 match self.service.poll() {
                     Async::Ready(event) => match event {
-                        SessionEvent::Message(msg) => {}
-                        SessionEvent::UpdatedEnr(enr) => {}
+                        SessionEvent::Message(msg) => {
+                            self.incomming_rpc(*msg);
+                        }
+                        SessionEvent::UpdatedEnr(enr) => {
+                            debug!("ENR updated: {}", enr);
+                            self.add_enr(*enr);
+                        }
                         SessionEvent::WhoAreYouRequest {
                             src,
                             src_id,
                             auth_tag,
-                        } => {}
-                        SessionEvent::RequestFailed(rpc_id, node_id) => {}
+                        } => {
+                            // check what our latest known ENR is for this node.
+                            if let Some(known_enr) = self.find_enr(&src_id) {
+                                self.service.send_whoareyou(
+                                    src,
+                                    &src_id,
+                                    known_enr.seq,
+                                    Some(known_enr),
+                                    auth_tag,
+                                );
+                            } else {
+                                // do not know of this peer
+                                debug!("Peer Id unknown, requesting ENR. NodeId: {:?}", src_id);
+                                self.service.send_whoareyou(src, &src_id, 0, None, auth_tag)
+                            }
+                        }
+                        SessionEvent::RequestFailed(node_id, rpc_id) => {
+                            self.rpc_failure(node_id, rpc_id);
+                        }
                     },
                     Async::NotReady => break,
                 }
