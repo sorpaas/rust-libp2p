@@ -1,3 +1,16 @@
+//! Session management for the Discv5 Discovery service.
+//!
+//! The `SessionService` is responsible for establishing and maintaining sessions with
+//! connected/discovered nodes. Each node, identified by it's [`NodeId`] is associated with a
+//! [`Session`]. This service drives the handshakes for establishing the sessions and associated
+//! logic for sending/requesting initial connections/ENR's from unknown peers.
+//!
+//! The `SessionService` also manages the timeouts for each request and reports back RPC failures,
+//! session timeouts and received messages. Messages are enrypted and decrypted using the
+//! associated `Session` for each node.
+//!
+//TODO: Document the Event structure and WHOAREYOU requests to the protocol layer.
+
 use super::packet::{
     AuthHeader, AuthResponse, AuthTag, NodeId, Nonce, Packet, Tag, MAGIC_LENGTH, TAG_LENGTH,
 };
@@ -19,37 +32,44 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 use tokio::timer::Interval;
 
-// TODO:
-//      Return Session not established
-//      Connection fails after retries, drop the session and send RPC failure.
+// TODO: Drop the session on RPC timeout.
 
 mod tests;
 
-/// Seconds before the keys of an established connection timeout.
-//TODO: This is short for testing.
+/// Seconds before a timeout expires.
 const REQUEST_TIMEOUT: u64 = 10;
+/// The number of times to retry a request.
 const REQUEST_RETRIES: u8 = 2;
-const HEARTBEAT_INTERVAL: u64 = 5;
+/// The interval (in seconds) to check for timeouts.
+const HEARTBEAT_INTERVAL: u64 = 2;
 
 pub struct SessionService {
     /// Queue of events produced by the session service.
     events: VecDeque<SessionEvent>,
+
     /// The local ENR.
     enr: Enr,
+
     /// The keypair to sign the ENR and set up encrypted communication with peers.
     keypair: Keypair,
+
     /// Pending raw requests. A list of raw messages we are awaiting a response from the remote
     /// for.
     pending_requests: FnvHashMap<AuthTag, Request>,
-    /// Sent WHOAREYOU messages. Stored separately to resend in heartbeat if required.
+
+    /// Sent WHOAREYOU messages. Stored separately to lookup via `NodeId`.
     whoareyou_requests: FnvHashMap<NodeId, Request>,
+
     /// Pending messages. Messages awaiting to be sent, once a handshake has been established.
     pending_messages: FnvHashMap<NodeId, Vec<ProtocolMessage>>,
+
     /// Sessions that have been created for each node id. These can be established or
     /// awaiting response from remote nodes.
     sessions: FnvHashMap<NodeId, Session>,
+
     /// Heartbeat timer, used to to check for message and session timeouts.
     heartbeat: Interval,
+
     /// The discovery v5 UDP service.
     service: Discv5Service,
 }
@@ -311,7 +331,7 @@ impl SessionService {
         Ok(())
     }
 
-    // Processing logic for receiving a message containing an Authentication header
+    /// Handle a message that contains an authentication header.
     fn handle_auth_message(
         &mut self,
         src: SocketAddr,
@@ -408,6 +428,7 @@ impl SessionService {
         Ok(())
     }
 
+    /// Handle a standard message that does not contain an authentication header.
     fn handle_message(
         &mut self,
         src: SocketAddr,
@@ -475,7 +496,7 @@ impl SessionService {
         Ok(())
     }
 
-    // encrypts and sends any messages that were waiting for a session to be established
+    /// Encrypts and sends any messages that were waiting for a session to be established.
     #[inline]
     fn flush_messages(&mut self, dst: SocketAddr, dst_id: &NodeId) -> Result<(), ()> {
         let mut packets_to_send = Vec::new();
@@ -515,7 +536,7 @@ impl SessionService {
         Ok(())
     }
 
-    // wrapper around service.send() that adds all sent messages to the pending_requests hashmap
+    /// Wrapper around `service.send()` that adds all sent messages to the `pending_requests`.
     #[inline]
     fn send_request_packet(
         &mut self,
@@ -549,6 +570,7 @@ impl SessionService {
         }
     }
 
+    /// The heartbeat which checks for timeouts and reports back failed RPC requests/sessions.
     fn heartbeat(&mut self) {
         // remove expired requests/sessions
         // log pending request timeouts
@@ -693,23 +715,45 @@ impl SessionService {
 }
 
 #[derive(Debug)]
+/// The output from polling the `SessionSerivce`.
 pub enum SessionEvent {
+    /// A message was received.
     Message(Box<ProtocolMessage>),
+
+    /// An ENR was updated for a node.
     UpdatedEnr(Box<Enr>),
+
+    /// A WHOAREYOU packet needs to be sent. This requests the protocol layer to send back the
+    /// highest known ENR.
     WhoAreYouRequest {
         src: SocketAddr,
         src_id: NodeId,
         auth_tag: AuthTag,
     },
+
+    /// An RPC request failed. The parameters are NodeId and the RPC-ID associated with the
+    /// request.
     RequestFailed(NodeId, u64),
 }
 
 #[derive(Debug, Clone)]
+/// A request to a node that we are waiting for a response.
 pub struct Request {
+    /// The Id associated with the RPC.
     pub rpc_id: Option<u64>,
+
+    /// The destination socket address.
     pub dst: SocketAddr,
+
+    /// The `NodeId` the request was sent to.
     pub node_id: NodeId,
+
+    /// The raw discv5 packet sent.
     pub packet: Packet,
+
+    /// The `Instant` when this request timesout.
     pub timeout: Instant,
+
+    /// The number of times to re-send this request until it is considered failed.
     pub retries: u8,
 }

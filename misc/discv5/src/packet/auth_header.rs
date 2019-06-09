@@ -1,9 +1,11 @@
+///! The Authentication header associated with Discv5 Packets.
 use super::AuthTag;
 use enr::Enr;
 // use libp2p_core::identity::PublicKey;
 use log::debug;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 
+//TODO: generalise the scheme and associated crypto library.
 const AUTH_SCHEME_NAME: &str = "gsm";
 
 /// The Authentication header.
@@ -11,10 +13,13 @@ const AUTH_SCHEME_NAME: &str = "gsm";
 pub struct AuthHeader {
     /// Authentication nonce.
     pub auth_tag: AuthTag,
+
     /// The authentication scheme.
     pub auth_scheme_name: &'static str,
+
     /// The public key as a raw encoded bytes.
     pub ephemeral_pubkey: Vec<u8>,
+
     /// Authentication response.
     pub auth_response: Box<Vec<u8>>,
 }
@@ -29,6 +34,7 @@ impl AuthHeader {
         }
     }
 
+    /// RLP-encodes the authentication header.
     pub fn encode(&self) -> Vec<u8> {
         let mut s = RlpStream::new();
         s.append(self);
@@ -36,8 +42,13 @@ impl AuthHeader {
     }
 }
 
+/// An authentication response. This contains a signed challenge nonce, and optionally an updated
+/// ENR if the requester has an outdated ENR.
 pub struct AuthResponse {
+    /// A signature of the challenge nonce.
     pub signature: Vec<u8>,
+
+    /// An optional ENR, required if the requester has an out-dated ENR.
     pub updated_enr: Option<Enr>,
 }
 

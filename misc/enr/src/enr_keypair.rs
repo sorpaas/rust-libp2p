@@ -1,4 +1,4 @@
-///! A wrapper around the libp2p Keypair which performs ENR specific signing/verifcation.
+///! A wrapper around the libp2p Keypair which performs ENR specific signing/verification.
 use libp2p_core::identity::{self, Keypair, PublicKey};
 use secp256k1::Signature;
 use sha3::{Digest, Keccak256};
@@ -6,6 +6,7 @@ use std::error::Error;
 use std::fmt;
 
 #[derive(Clone)]
+/// The libp2p `Keypair` wrapper for ENR-specific signing.
 pub struct EnrKeypair {
     inner: Keypair,
 }
@@ -17,7 +18,7 @@ impl From<Keypair> for EnrKeypair {
 }
 
 impl EnrKeypair {
-    /// Perform ENR-specific signing.
+    /// Perform  the ENR-specific signing.
     // This can be modified as support for more keys are given.
     pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, SigningError> {
         match self.inner {
@@ -43,7 +44,7 @@ impl EnrKeypair {
     }
 }
 
-/// Wraps a libp2p `PublicKey` to allow for custom ENR signature verification.
+/// The libp2p `PublicKey` wrapper to allow for custom ENR signature verification.
 #[derive(Clone, Debug)]
 pub struct EnrPublicKey {
     inner: PublicKey,

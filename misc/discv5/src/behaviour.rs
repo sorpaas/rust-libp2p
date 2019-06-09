@@ -1,10 +1,13 @@
+//! The libp2p behaviour which implements [discovery v5](https://github.com/ethereum/devp2p/blob/master/discv5/discv5.md).
+
+//TODO: Document the behaviour
+
 use self::query_info::{QueryInfo, QueryType};
 use crate::kbucket::{self, KBucketsTable, NodeStatus};
-use crate::packet::NodeId;
 use crate::query::{Query, QueryConfig, QueryState, ReturnPeer};
 use crate::rpc;
 use crate::session_service::{SessionEvent, SessionService};
-use enr::Enr;
+use enr::{Enr, NodeId};
 use fnv::{FnvHashMap, FnvHashSet};
 use futures::prelude::*;
 use libp2p_core::identity::Keypair;

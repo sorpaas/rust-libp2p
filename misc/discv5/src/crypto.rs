@@ -4,7 +4,7 @@
 ///
 /// There is no abstraction in this module as the specification explicitly defines a singular
 /// encryption and key-derivation algorithms. Future versions may abstract some of these to allow
-/// of different algorithms.
+/// for different algorithms.
 use crate::error::Discv5Error;
 use crate::packet::{AuthHeader, AuthResponse, AuthTag, NodeId, Nonce, Tag, NODE_ID_LENGTH};
 use enr::Enr;

@@ -1,7 +1,11 @@
-//! Encodes/Decodes raw Discv5 UDP message packets as specified in the [discv5
-//! specification](https://github.com/ethereum/devp2p/blob/master/discv5/discv5.md).
+//! This module defines the raw UDP message packets for Discovery v5.
 //!
-//! Encryption/Decryption is handled outside of this module.
+//! The [discv5 wire specification](https://github.com/ethereum/devp2p/blob/master/discv5/discv5.md) provides further information on UDP message packets as implemented in this module.
+//!
+//! The `Packet` struct defines all raw UDP message variants and implements the encoding/decoding
+//! logic.
+//!
+//! Note, that all message encryption/decryption is handled outside of this module.
 
 mod auth_header;
 
@@ -21,7 +25,7 @@ pub const ID_NONCE_LENGTH: usize = 32;
 pub type AuthTag = [u8; AUTH_TAG_LENGTH];
 /// Packet Tag
 pub type Tag = [u8; TAG_LENGTH];
-/// ENR NodeId. This is the keccak256 hash of the uncompressed public key of the ENR record.
+/// ENR NodeId.
 pub type NodeId = [u8; NODE_ID_LENGTH];
 /// The nonce sent in a WHOAREYOU packet.
 pub type Nonce = [u8; ID_NONCE_LENGTH];
@@ -30,42 +34,79 @@ pub type Nonce = [u8; ID_NONCE_LENGTH];
 pub enum Packet {
     /// Packet for establishing handshake.
     RandomPacket {
+        /// The XOR(SHA256(dest-node-id), src-node-id).
         tag: Tag,
+
         /// Random auth_tag formatted as rlp_bytes(bytes).
         auth_tag: AuthTag,
+
         /// At least 44 bytes of random data.
         data: Box<Vec<u8>>,
     },
     /// Handshake packet to establish identities.
     WhoAreYou {
+        /// The XOR(SHA256(dest-node-id), src-node-id).
         tag: Tag,
+
         /// SHA256(`dest-node-id` || "WHOAREYOU").
         magic: [u8; MAGIC_LENGTH],
+
         /// The auth-tag of the request.
         token: AuthTag, //potentially rename to auth-tag
+
         /// The `id-nonce` to prevent handshake replays.
         id_nonce: Nonce,
+
         /// Highest known ENR sequence number of node.
         enr_seq: u64,
     },
     /// Message sent with an extended authentication header.
     AuthMessage {
+        /// The XOR(SHA256(dest-node-id), src-node-id).
         tag: Tag,
+
         /// Authentication header.
         auth_header: AuthHeader,
-        /// Message AES_GCM encrypted with with the authentication header.
+
+        /// The encrypted message including the authentication header.
         message: Box<Vec<u8>>,
     },
     /// A standard discv5 message.
     Message {
+        /// The XOR(SHA256(dest-node-id), src-node-id).
         tag: Tag,
+
         /// 12 byte Authentication nonce.
         auth_tag: AuthTag,
+
+        /// The encrypted message as raw bytes.
         message: Box<Vec<u8>>,
     },
 }
 
 impl Packet {
+    /// Generates a Packet::Random given a `tag`.
+    pub fn random(tag: Tag) -> Packet {
+        let data: Vec<u8> = (0..44).map(|_| rand::random::<u8>()).collect();
+        let data = Box::new(data);
+
+        Packet::RandomPacket {
+            tag,
+            auth_tag: rand::random(),
+            data,
+        }
+    }
+
+    /// The authentication tag for all packets except WHOAREYOU.
+    pub fn auth_tag(&self) -> Option<&AuthTag> {
+        match &self {
+            Packet::RandomPacket { auth_tag, .. } => Some(auth_tag),
+            Packet::AuthMessage { auth_header, .. } => Some(&auth_header.auth_tag),
+            Packet::Message { auth_tag, .. } => Some(auth_tag),
+            Packet::WhoAreYou { .. } => None,
+        }
+    }
+
     /// Encodes a packet to bytes.
     pub fn encode(&self) -> Vec<u8> {
         match self {
@@ -125,6 +166,7 @@ impl Packet {
         }
     }
 
+    /// Decodes a WHOAREYOU packet.
     fn decode_whoareyou(tag: Tag, data: &[u8]) -> Result<Self, PacketError> {
         // 32 tag + 32 magic + 32 token + 12 id + 2 enr + 1 rlp
         // decode the rlp list
@@ -171,6 +213,7 @@ impl Packet {
         });
     }
 
+    /// Decodes a regular message into a `Packet`.
     fn decode_standard_message(tag: Tag, data: &[u8]) -> Result<Self, PacketError> {
         let rlp = rlp::Rlp::new(&data[TAG_LENGTH..TAG_LENGTH + AUTH_TAG_LENGTH + 1]);
         let auth_tag_bytes: Vec<u8> = match rlp.as_val() {
@@ -191,6 +234,7 @@ impl Packet {
         });
     }
 
+    /// Decodes a message that contains an authentication header.
     fn decode_auth_header(tag: Tag, data: &[u8], rlp_length: usize) -> Result<Self, PacketError> {
         let auth_header_rlp = rlp::Rlp::new(&data[TAG_LENGTH..TAG_LENGTH + rlp_length]);
         let auth_header =
@@ -253,31 +297,10 @@ impl Packet {
         debug!("Failed identifying message: {:?}", data);
         Err(PacketError::UnknownPacket)
     }
-
-    /// Generates a Packet::Random given a `tag`.
-    pub fn random(tag: Tag) -> Packet {
-        let data: Vec<u8> = (0..44).map(|_| rand::random::<u8>()).collect();
-        let data = Box::new(data);
-
-        Packet::RandomPacket {
-            tag,
-            auth_tag: rand::random(),
-            data,
-        }
-    }
-
-    /// The authentication tag for all packets except WHOAREYOU.
-    pub fn auth_tag(&self) -> Option<&AuthTag> {
-        match &self {
-            Packet::RandomPacket { auth_tag, .. } => Some(auth_tag),
-            Packet::AuthMessage { auth_header, .. } => Some(&auth_header.auth_tag),
-            Packet::Message { auth_tag, .. } => Some(auth_tag),
-            Packet::WhoAreYou { .. } => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
+/// Types of packet errors.
 pub enum PacketError {
     UnknownFormat,
     UnknownPacket,

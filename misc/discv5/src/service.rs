@@ -1,18 +1,18 @@
-//! This starts a discv5 UDP service connection which handles discovery of peers and manages topics
-//! and their advertisements as described by the [discv5
-//! specification](https://github.com/ethereum/devp2p/blob/master/discv5/discv5.md).
+//! The base UDP layer of the discv5 service.
+//!
+//! The `Discv5Service` opens a UDP socket and handles the encoding/decoding of raw Discv5
+//! messages. These messages are defined in the `Packet` module.
 
 use super::packet::{Packet, MAGIC_LENGTH};
 use futures::prelude::*;
-// use sha2::{Digest, Sha256};
 use std::io;
 use std::net::SocketAddr;
-// use std::time::Instant;
 use tokio_udp::UdpSocket;
 
 const MAX_PACKET_SIZE: usize = 1280;
 
-/// The main service that handles the transport. Specifically the UDP sockets and session/encryption.
+/// The main service that handles the transport. Specifically the UDP sockets and packet
+/// encoding/decoding.
 pub struct Discv5Service {
     /// The UDP socket for interacting over UDP.
     socket: UdpSocket,
@@ -25,6 +25,7 @@ pub struct Discv5Service {
 }
 
 impl Discv5Service {
+    /// Initializes the UDP socket, can fail when binding the socket.
     pub fn new(socket_addr: SocketAddr, whoareyou_magic: [u8; MAGIC_LENGTH]) -> io::Result<Self> {
         // set up the UDP socket
         let socket = UdpSocket::bind(&socket_addr)?;
@@ -42,6 +43,7 @@ impl Discv5Service {
         self.send_queue.push((to, packet));
     }
 
+    /// Drive reading/writting to the UDP socket.
     pub fn poll(&mut self) -> Async<(SocketAddr, Packet)> {
         // send messages
         while !self.send_queue.is_empty() {

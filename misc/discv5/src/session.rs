@@ -1,3 +1,16 @@
+//! The `Session` struct handles the stages of creating and establishing a handshake with a
+//! peer.
+//!
+//! There are ways a Session gets initialised.
+//!
+//! - An message to an unknown peer is requested. In this case a RANDOM packet is sent to the peer.
+//! This session is created using the `new_random()` function.
+//! - A message was received from an unknown peer and we start the `Session` by sending a
+//! WHOAREYOU message.
+//!
+//! A `Session` is responsible for generating,deriving and holding keys for sessions between
+//! peers.
+
 use super::packet::{AuthHeader, AuthTag, NodeId, Nonce, Packet, Tag, MAGIC_LENGTH};
 use crate::crypto;
 use crate::Discv5Error;
@@ -9,6 +22,8 @@ use zeroize::Zeroize;
 
 const WHOAREYOU_STRING: &'static str = "WHOAREYOU";
 const NONCE_STRING: &'static str = "discovery-id-nonce";
+
+//TODO: This is short for testing.
 const SESSION_TIMEOUT: u64 = 30;
 
 pub struct Session {
