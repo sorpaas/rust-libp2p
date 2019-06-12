@@ -1,7 +1,7 @@
 use crate::kbucket::Key;
 use crate::packet::NodeId;
 use crate::query::ReturnPeer;
-use crate::rpc::{Request, RpcType};
+use crate::rpc::Request;
 use enr::Enr;
 use sha2::digest::generic_array::GenericArray;
 use smallvec::SmallVec;
@@ -30,7 +30,7 @@ impl QueryInfo {
     pub fn into_rpc_request(
         &self,
         return_peer: &ReturnPeer<NodeId>,
-    ) -> Result<RpcType, &'static str> {
+    ) -> Result<Request, &'static str> {
         let request = match &self.query_type {
             QueryType::FindNode(node_id) => {
                 let distance = findnode_log2distance(node_id, return_peer)
@@ -39,7 +39,7 @@ impl QueryInfo {
             }
         };
 
-        Ok(RpcType::Request(request))
+        Ok(request)
     }
 
     pub fn iterations(&self) -> usize {

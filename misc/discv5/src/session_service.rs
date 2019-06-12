@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::default::Default;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::timer::Interval;
 
@@ -326,6 +326,15 @@ impl SessionService {
             })?;
 
         debug!("Session established with node: {}", hex::encode(src_id));
+        // session has been established, notify the protocol
+
+        self.events.push_back(SessionEvent::Established(
+            src_id,
+            session
+                .remote_enr()
+                .clone()
+                .expect("ENR exists when awaiting a WHOAREYOU"),
+        ));
         // send the response
         debug!(
             "Sending Authentication response to node: {} at: {:?}",
@@ -424,6 +433,15 @@ impl SessionService {
             self.sessions.remove(&src_id);
             return Err(());
         }
+
+        // session has been established, notify the protocol
+        self.events.push_back(SessionEvent::Established(
+            src_id,
+            session
+                .remote_enr()
+                .clone()
+                .expect("ENR exists when awaiting a WHOAREYOU"),
+        ));
 
         // decrypt the message
         let mut aad = tag.to_vec();
@@ -683,14 +701,14 @@ impl SessionService {
                             ..
                         } => {
                             let src_id = self.src_id(&tag);
-                            self.handle_whoareyou(src, src_id, token, id_nonce, enr_seq);
+                            let _ = self.handle_whoareyou(src, src_id, token, id_nonce, enr_seq);
                         }
                         Packet::AuthMessage {
                             tag,
                             auth_header,
                             message,
                         } => {
-                            self.handle_auth_message(src, tag, auth_header, &message);
+                            let _ = self.handle_auth_message(src, tag, auth_header, &message);
                         }
                         Packet::Message {
                             tag,
@@ -698,7 +716,7 @@ impl SessionService {
                             message,
                         } => {
                             let src_id = self.src_id(&tag);
-                            self.handle_message(src, src_id, auth_tag, &message, &tag);
+                            let _ = self.handle_message(src, src_id, auth_tag, &message, &tag);
                         }
                         Packet::RandomPacket { .. } => {} // this will not be decoded.
                     }
@@ -729,6 +747,8 @@ impl SessionService {
 #[derive(Debug)]
 /// The output from polling the `SessionSerivce`.
 pub enum SessionEvent {
+    /// A session has been established with a node.
+    Established(NodeId, Enr),
     /// A message was received.
     Message {
         src_id: NodeId,

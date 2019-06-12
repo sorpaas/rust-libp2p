@@ -236,7 +236,7 @@ impl Enr {
         &mut self,
         key: &str,
         value: Vec<u8>,
-        keypair: Keypair,
+        keypair: &Keypair,
     ) -> Result<bool, EnrError> {
         self.content.insert(key.into(), value);
         // add the new public key
@@ -264,7 +264,7 @@ impl Enr {
         Ok(true)
     }
 
-    pub fn set_ip(&mut self, ip: IpAddr, keypair: Keypair) -> Result<bool, EnrError> {
+    pub fn set_ip(&mut self, ip: IpAddr, keypair: &Keypair) -> Result<bool, EnrError> {
         let ip_bytes = match ip {
             IpAddr::V4(addr) => addr.octets().to_vec(),
             IpAddr::V6(addr) => addr.octets().to_vec(),
@@ -272,12 +272,50 @@ impl Enr {
         self.add_key("ip", ip_bytes, keypair)
     }
 
-    pub fn set_udp(&mut self, udp: u16, keypair: Keypair) -> Result<bool, EnrError> {
+    pub fn set_udp(&mut self, udp: u16, keypair: &Keypair) -> Result<bool, EnrError> {
         self.add_key("udp", udp.to_be_bytes().to_vec(), keypair)
     }
 
-    pub fn set_tcp(&mut self, tcp: u16, keypair: Keypair) -> Result<bool, EnrError> {
+    pub fn set_tcp(&mut self, tcp: u16, keypair: &Keypair) -> Result<bool, EnrError> {
         self.add_key("tcp", tcp.to_be_bytes().to_vec(), keypair)
+    }
+
+    /// Sets the ip and udp port in a single update with a single increment in sequence number.
+    pub fn set_udp_socket(
+        &mut self,
+        socket: SocketAddr,
+        keypair: &Keypair,
+    ) -> Result<bool, EnrError> {
+        let ip_bytes = match socket.ip() {
+            IpAddr::V4(addr) => addr.octets().to_vec(),
+            IpAddr::V6(addr) => addr.octets().to_vec(),
+        };
+
+        self.content.insert("ip".into(), ip_bytes);
+        self.content
+            .insert("udp".into(), socket.port().to_be_bytes().to_vec());
+
+        let enr_keypair = EnrKeypair::from(keypair.clone());
+        let public_key = enr_keypair.public();
+        self.content
+            .insert(public_key.clone().into(), public_key.encode());
+        // increment the sequence number
+        self.seq += 1;
+
+        // construct compact signature
+        let signature = enr_keypair
+            .sign(&self.rlp_content())
+            .map_err(|_| EnrError::SigningError)?;
+
+        // update the node id
+        self.node_id = Enr::node_id(&keypair.public());
+
+        // check the size of the record
+        if self.rlp_content.len() + signature.len() + 8 > MAX_ENR_SIZE {
+            return Err(EnrError::ExceedsMaxSize);
+        }
+
+        Ok(true)
     }
 
     pub fn set_public_key(&mut self, keypair: &Keypair) {
@@ -457,7 +495,7 @@ impl Decodable for Enr {
             DecoderError::Custom("List decode fail")
         })?;
 
-        if decoded_list.len() % 2 != 0 {
+        if decoded_list.len() > 0 && decoded_list.len() % 2 != 0 {
             debug!("Failed to decode ENR. List size is not a multiple of 2.");
             return Err(DecoderError::Custom("List not a multiple of two"));
         }

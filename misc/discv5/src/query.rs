@@ -461,35 +461,6 @@ where
     }
 }
 
-/// Outcome of polling a query.
-#[derive(Debug, Clone)]
-pub enum QueryPollOut<'a, TTarget, TNodeId> {
-    /// The query is finished.
-    ///
-    /// If this is a `FindValue` query, the user is supposed to extract the record themselves from
-    /// any RPC result sent by a remote. If the query finished without that happening, this means
-    /// that we didn't find any record.
-    ///
-    /// If this is a `FindNode` query, you can call `into_closest_peers` in order to obtain the
-    /// result.
-    Finished,
-
-    /// We need to send an RPC query to the given peer.
-    ///
-    /// The RPC query to send can be derived from the target of the query.
-    ///
-    /// After this has been returned, you should call either `inject_rpc_result` or
-    /// `inject_rpc_error` at a later point in time.
-    SendRpc {
-        /// The peer to send the RPC query to.
-        node_id: &'a TNodeId,
-        /// The number of times this rpc has been requested for this peer.
-        iteration: usize,
-        /// A reminder of the query target. Same as what you obtain by calling `target()`.
-        query_target: &'a TTarget,
-    },
-}
-
 /// Stage of the query.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 enum QueryProgress {
