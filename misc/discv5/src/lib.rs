@@ -15,4 +15,5 @@ mod service;
 mod session;
 pub(crate) mod session_service;
 
+pub use behaviour::{Discv5, Discv5Event};
 pub use error::Discv5Error;

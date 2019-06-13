@@ -1,8 +1,8 @@
 use crate::kbucket::Key;
-use crate::packet::NodeId;
 use crate::query::ReturnPeer;
 use crate::rpc::Request;
 use enr::Enr;
+use enr::NodeId;
 use sha2::digest::generic_array::GenericArray;
 use smallvec::SmallVec;
 
@@ -51,8 +51,11 @@ impl QueryInfo {
 
 impl Into<Key<QueryInfo>> for QueryInfo {
     fn into(self) -> Key<QueryInfo> {
+        let cloned_self = self.clone();
         match self.query_type {
-            QueryType::FindNode(node_id) => Key::new_raw(self, *GenericArray::from_slice(&node_id)),
+            QueryType::FindNode(node_id) => {
+                Key::new_raw(cloned_self, *GenericArray::from_slice(&node_id.raw()))
+            }
         }
     }
 }
@@ -93,66 +96,63 @@ mod tests {
 
     #[test]
     fn test_log2distance() {
-        let target: NodeId = [0u8; 32];
-        let mut destination: NodeId = [0u8; 32];
+        let target = NodeId::new(&[0u8; 32]);
+        let mut destination = [0u8; 32];
         destination[10] = 1; // gives a log2 distance of 168
-        let dst_key: Key<NodeId> = destination.into();
-        let log2_distance = dst_key.log2_distance(&target.into());
+        let destination = NodeId::new(&destination);
 
         let expected_distances = vec![168, 167, 169, 166, 170, 165, 171, 164, 172];
 
-        for (iteration, value) in expected_distances.iter().enumerate() {
+        for (iteration, distance) in expected_distances.into_iter().enumerate() {
             let return_peer = ReturnPeer {
                 node_id: destination.clone(),
                 iteration: iteration + 1,
             };
             assert_eq!(
                 findnode_log2distance(&target, &return_peer).unwrap(),
-                expected_distances[iteration]
+                distance
             );
         }
     }
 
     #[test]
     fn test_log2distance_lower() {
-        let target: NodeId = [0u8; 32];
-        let mut destination: NodeId = [0u8; 32];
+        let target = NodeId::new(&[0u8; 32]);
+        let mut destination = [0u8; 32];
         destination[31] = 16; // gives a log2 distance of 4
-        let dst_key: Key<NodeId> = destination.into();
-        let log2_distance = dst_key.log2_distance(&target.into());
+        let destination = NodeId::new(&destination);
 
         let expected_distances = vec![4, 3, 5, 2, 6, 1, 7, 0, 8, 9, 10];
 
-        for (iteration, value) in expected_distances.iter().enumerate() {
+        for (iteration, distance) in expected_distances.into_iter().enumerate() {
             let return_peer = ReturnPeer {
                 node_id: destination.clone(),
                 iteration: iteration + 1,
             };
             assert_eq!(
                 findnode_log2distance(&target, &return_peer).unwrap(),
-                expected_distances[iteration]
+                distance
             );
         }
     }
 
     #[test]
     fn test_log2distance_upper() {
-        let target: NodeId = [0u8; 32];
-        let mut destination: NodeId = [0u8; 32];
+        let target = NodeId::new(&[0u8; 32]);
+        let mut destination = [0u8; 32];
         destination[0] = 16; // gives a log2 distance of 252
-        let dst_key: Key<NodeId> = destination.into();
-        let log2_distance = dst_key.log2_distance(&target.into());
+        let destination = NodeId::new(&destination);
 
         let expected_distances = vec![252, 251, 253, 250, 254, 249, 255, 248, 256, 247, 246];
 
-        for (iteration, value) in expected_distances.iter().enumerate() {
+        for (iteration, distance) in expected_distances.into_iter().enumerate() {
             let return_peer = ReturnPeer {
                 node_id: destination.clone(),
                 iteration: iteration + 1,
             };
             assert_eq!(
                 findnode_log2distance(&target, &return_peer).unwrap(),
-                expected_distances[iteration]
+                distance
             );
         }
     }

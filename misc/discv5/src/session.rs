@@ -11,10 +11,10 @@
 //! A `Session` is responsible for generating,deriving and holding keys for sessions between
 //! peers.
 
-use super::packet::{AuthHeader, AuthTag, NodeId, Nonce, Packet, Tag, MAGIC_LENGTH};
+use super::packet::{AuthHeader, AuthTag, Nonce, Packet, Tag, MAGIC_LENGTH};
 use crate::crypto;
 use crate::Discv5Error;
-use enr::Enr;
+use enr::{Enr, NodeId};
 use libp2p_core::identity::Keypair;
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
@@ -84,7 +84,7 @@ impl Session {
         let whoareyou_packet = {
             let magic = {
                 let mut hasher = Sha256::new();
-                hasher.input(node_id);
+                hasher.input(node_id.raw());
                 hasher.input(WHOAREYOU_STRING.as_bytes());
                 let mut magic = [0u8; MAGIC_LENGTH];
                 magic.copy_from_slice(&hasher.result());
@@ -202,7 +202,7 @@ impl Session {
         let (decryption_key, encryption_key, auth_resp_key) = crypto::derive_keys_from_pubkey(
             local_keypair,
             local_id,
-            &remote_enr.node_id,
+            remote_enr.node_id(),
             &id_nonce,
             &auth_header.ephemeral_pubkey,
         )?;

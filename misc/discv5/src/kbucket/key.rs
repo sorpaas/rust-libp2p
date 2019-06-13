@@ -18,8 +18,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::packet::NodeId;
 use bigint::U256;
+use enr::NodeId;
 use libp2p_core::PeerId;
 use multihash::Multihash;
 use sha2::{
@@ -120,7 +120,7 @@ impl From<NodeId> for Key<NodeId> {
     fn from(node_id: NodeId) -> Self {
         Key {
             preimage: node_id.clone(),
-            hash: *GenericArray::from_slice(&node_id),
+            hash: *GenericArray::from_slice(&node_id.raw()),
         }
     }
 }

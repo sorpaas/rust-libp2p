@@ -1,4 +1,4 @@
-use crate::packet::NodeId;
+use enr::NodeId;
 use fnv::FnvHashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;

@@ -41,15 +41,15 @@
 //! [`NodeId`]: crate::enr::NodeId
 
 mod enr_keypair;
+mod node_id;
 
 use crate::enr_keypair::{EnrKeypair, EnrPublicKey};
 use base64;
-use bs58;
 use libp2p_core::identity::{ed25519, Keypair, PublicKey};
 use log::debug;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
-use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::net::{IpAddr, SocketAddr};
 
 use libp2p_core::{
@@ -58,11 +58,9 @@ use libp2p_core::{
     PeerId,
 };
 
-const MAX_ENR_SIZE: usize = 300;
+pub use node_id::NodeId;
 
-/// The identifier for an ENR record. This is the keccak256 hash of the public key (for secp256k1
-/// this is the uncompressed encoded form of the public key).
-pub type NodeId = [u8; 32];
+const MAX_ENR_SIZE: usize = 300;
 
 /// The ENR Record.
 ///
@@ -73,7 +71,7 @@ pub struct Enr {
     pub seq: u64,
 
     /// The `NodeId` of the ENR record.
-    pub node_id: NodeId,
+    node_id: NodeId,
 
     /// Key-value contents of the ENR.
     content: HashMap<String, Vec<u8>>,
@@ -92,6 +90,11 @@ impl Enr {
     /// The libp2p PeerId for the record.
     pub fn peer_id(&self) -> PeerId {
         self.public_key().into()
+    }
+
+    /// The libp2p PeerId for the record.
+    pub fn node_id(&self) -> &NodeId {
+        &self.node_id
     }
 
     /// Returns a list of multiaddrs if the ENR has an `ip` and either a `tcp` or `udp` key. The
@@ -254,7 +257,7 @@ impl Enr {
             .map_err(|_| EnrError::SigningError)?;
 
         // update the node id
-        self.node_id = Enr::node_id(&keypair.public());
+        self.node_id = NodeId::from(keypair.public());
 
         // check the size of the record
         if self.rlp_content.len() + signature.len() + 8 > MAX_ENR_SIZE {
@@ -308,7 +311,7 @@ impl Enr {
             .map_err(|_| EnrError::SigningError)?;
 
         // update the node id
-        self.node_id = Enr::node_id(&keypair.public());
+        self.node_id = NodeId::from(keypair.public());
 
         // check the size of the record
         if self.rlp_content.len() + signature.len() + 8 > MAX_ENR_SIZE {
@@ -337,23 +340,12 @@ impl Enr {
         }
         stream.drain()
     }
-
-    /// Returns the node-id of the associated ENR record. This is the keccak256
-    /// hash of the public key. ENR records cannot be created without a valid public key.
-    /// Therefore this will always return a value.
-    fn node_id(public_key: &PublicKey) -> NodeId {
-        let pubkey_bytes = EnrPublicKey::from(public_key.clone()).encode_uncompressed();
-        let mut node_id: NodeId = [0; 32];
-        let hash = Keccak256::digest(&pubkey_bytes);
-        node_id.copy_from_slice(&hash);
-        node_id
-    }
 }
 
 impl std::fmt::Display for Enr {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.debug_struct("ENR")
-            .field("NodeId", &bs58::encode(self.node_id).into_string())
+            .field("NodeId", &self.node_id())
             //.field("PeerId", self.peer_id().to_base(58))
             .field("seq", &self.seq)
             .field("ip", &self.ip())
@@ -361,6 +353,17 @@ impl std::fmt::Display for Enr {
             .field("udp", &self.udp())
             .field("public key", &self.public_key())
             .finish()
+    }
+}
+
+/// Convert a URL-SAFE base64 encoded ENR into an ENR.
+impl TryFrom<String> for Enr {
+    type Error = &'static str;
+
+    fn try_from(base64_string: String) -> Result<Self, Self::Error> {
+        let bytes = base64::decode_config(&base64_string, base64::URL_SAFE)
+            .map_err(|_| "Invalid base64 encoding")?;
+        rlp::decode::<Enr>(&bytes).map_err(|_| "Invalid ENR")
     }
 }
 
@@ -463,7 +466,7 @@ impl EnrBuilder {
 
         Ok(Enr {
             seq: self.seq,
-            node_id: Enr::node_id(&key.public()),
+            node_id: NodeId::from(key.public()),
             content: self.content.clone(),
             rlp_content,
             signature,
@@ -554,7 +557,7 @@ impl Decodable for Enr {
         };
 
         // calculate the node id
-        let node_id = Enr::node_id(&public_key);
+        let node_id = NodeId::from(public_key);
 
         let enr = Enr {
             seq,
@@ -678,7 +681,7 @@ mod tests {
             builder.build(&key).unwrap()
         };
 
-        assert!(enr.add_key("random", Vec::new(), key).unwrap());
+        assert!(enr.add_key("random", Vec::new(), &key).unwrap());
     }
 
     #[test]
@@ -695,7 +698,7 @@ mod tests {
             builder.build(&key).unwrap()
         };
 
-        assert!(enr.set_ip(ip.into(), key.clone()).unwrap());
+        assert!(enr.set_ip(ip.into(), &key).unwrap());
         assert_eq!(enr.id(), Some(id.into()));
         assert_eq!(enr.ip(), Some(ip.into()));
         assert_eq!(enr.tcp(), Some(tcp));

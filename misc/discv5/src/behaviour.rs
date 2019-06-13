@@ -31,6 +31,7 @@ use tokio_io::{AsyncRead, AsyncWrite};
 
 mod ip_vote;
 mod query_info;
+mod test;
 
 type QueryId = usize;
 type RpcId = u64;
@@ -101,7 +102,10 @@ impl<TSubstream> Discv5<TSubstream> {
             keypair,
             events: SmallVec::new(),
             known_peer_ids: HashMap::new(),
-            kbuckets: KBucketsTable::new(local_enr.node_id.into(), Duration::from_secs(60)),
+            kbuckets: KBucketsTable::new(
+                local_enr.node_id().clone().into(),
+                Duration::from_secs(60),
+            ),
             active_queries: Default::default(),
             active_rpc_requests: Default::default(),
             active_nodes_responses: HashMap::new(),
@@ -124,8 +128,8 @@ impl<TSubstream> Discv5<TSubstream> {
     pub fn add_enr(&mut self, enr: Enr) {
         // add to the known_peer_ids mapping
         self.known_peer_ids
-            .insert(enr.peer_id().clone(), enr.node_id.clone());
-        let key = kbucket::Key::from(enr.clone().node_id);
+            .insert(enr.peer_id().clone(), enr.node_id().clone());
+        let key = kbucket::Key::from(enr.node_id().clone());
         match self.kbuckets.entry(&key) {
             kbucket::Entry::Present(mut entry, _) => {
                 *entry.value() = enr;
@@ -154,6 +158,10 @@ impl<TSubstream> Discv5<TSubstream> {
         };
     }
 
+    pub fn local_enr(&self) -> &Enr {
+        &self.local_enr
+    }
+
     /// Returns an iterator over all ENR node IDs of nodes currently contained in a bucket
     /// of the Kademlia routing table.
     pub fn kbuckets_entries(&mut self) -> impl Iterator<Item = &NodeId> {
@@ -175,7 +183,7 @@ impl<TSubstream> Discv5<TSubstream> {
         query_info: &QueryInfo,
         return_peer: &ReturnPeer<NodeId>,
     ) {
-        let node_id = return_peer.node_id;
+        let node_id = return_peer.node_id.clone();
 
         let req = match query_info.into_rpc_request(return_peer) {
             Ok(r) => r,
@@ -255,12 +263,12 @@ impl<TSubstream> Discv5<TSubstream> {
 
     /// Processes discovered peers from a query.
     fn discovered(&mut self, query_id: &QueryId, source: &NodeId, peers: Vec<Enr>) {
-        let local_id = self.kbuckets.local_key().preimage().clone();
-        let others_iter = peers.into_iter().filter(|p| p.node_id != local_id);
+        let local_id = self.kbuckets.local_key().preimage();
+        let others_iter = peers.into_iter().filter(|p| p.node_id() != local_id);
 
         for peer in others_iter.clone() {
             self.events.push(Discv5Event::Discovered {
-                enr_id: peer.node_id.clone(),
+                enr_id: peer.node_id().clone(),
                 addresses: peer.multiaddr().clone(),
             });
         }
@@ -271,23 +279,23 @@ impl<TSubstream> Discv5<TSubstream> {
                     .target_mut()
                     .untrusted_enrs
                     .iter()
-                    .position(|e| e.node_id == peer.node_id)
+                    .position(|e| e.node_id() == peer.node_id())
                     .is_none()
                 {
                     query.target_mut().untrusted_enrs.push(peer.clone());
                 }
             }
-            query.on_success(source, others_iter.map(|kp| kp.node_id))
+            query.on_success(source, others_iter.map(|kp| kp.node_id().clone()))
         }
     }
 
     /// Update the connection status of a peer in the Kademlia routing table.
     fn connection_updated(&mut self, node_id: NodeId, enr: Option<Enr>, new_status: NodeStatus) {
-        let key = kbucket::Key::new(node_id.clone());
+        let key = kbucket::Key::from(node_id.clone());
         // add the known PeerId
         if let Some(enr_copy) = enr.clone() {
             self.known_peer_ids
-                .insert(enr_copy.peer_id(), enr_copy.node_id);
+                .insert(enr_copy.peer_id(), enr_copy.node_id().clone());
         }
         match self.kbuckets.entry(&key) {
             kbucket::Entry::Present(mut entry, old_status) => {
@@ -340,7 +348,7 @@ impl<TSubstream> Discv5<TSubstream> {
     /// session key-pair has been negotiated.
     fn inject_session_established(&mut self, node_id: NodeId, enr: Enr) {
         self.known_peer_ids.insert(enr.peer_id(), node_id.clone());
-        self.connection_updated(node_id, Some(enr), NodeStatus::Connected);
+        self.connection_updated(node_id.clone(), Some(enr), NodeStatus::Connected);
         self.connected_peers.insert(node_id);
     }
 
@@ -363,7 +371,7 @@ impl<TSubstream> Discv5<TSubstream> {
 
     /// A session could not be established or an RPC request timed-out (after a few retries).
     fn rpc_failure(&mut self, node_id: NodeId, failed_rpc_id: RpcId) {
-        let req = RpcRequest(failed_rpc_id, node_id);
+        let req = RpcRequest(failed_rpc_id, node_id.clone());
 
         if let Some(Some(query_id)) = self.active_rpc_requests.get(&req) {
             if let Some(query) = self.active_queries.get_mut(&query_id) {
@@ -378,7 +386,7 @@ impl<TSubstream> Discv5<TSubstream> {
 
     fn find_enr(&mut self, node_id: &NodeId) -> Option<Enr> {
         // check if we know this node id in our routing table
-        let key = kbucket::Key::new(node_id.clone());
+        let key = kbucket::Key::from(node_id.clone());
         if let kbucket::Entry::Present(mut entry, _) = self.kbuckets.entry(&key) {
             return Some(entry.value().clone());
         }
@@ -388,7 +396,7 @@ impl<TSubstream> Discv5<TSubstream> {
                 .target()
                 .untrusted_enrs
                 .iter()
-                .find(|v| &v.node_id == node_id)
+                .find(|v| v.node_id() == node_id)
             {
                 return Some(enr.clone());
             }
@@ -406,7 +414,7 @@ impl<TSubstream> Discv5<TSubstream> {
         req: rpc::Request,
     ) {
         // check for the ENR for the sender.
-        let enr = match self.kbuckets.entry(&node_id.into()) {
+        let enr = match self.kbuckets.entry(&node_id.clone().into()) {
             kbucket::Entry::Present(ref mut entry, _) => entry.value().clone(),
             kbucket::Entry::Pending(ref mut entry, _) => entry.value().clone(),
             _ => {
@@ -449,7 +457,7 @@ impl<TSubstream> Discv5<TSubstream> {
     /// Processes an RPC response from a peer.
     fn handle_rpc_response(&mut self, node_id: NodeId, rpc_id: u64, res: rpc::Response) {
         // verify we know of the rpc_id
-        let req = RpcRequest(rpc_id, node_id);
+        let req = RpcRequest(rpc_id, node_id.clone());
         if let Some(query_id) = self.active_rpc_requests.remove(&req) {
             match res {
                 rpc::Response::Nodes { total, nodes } => {
@@ -462,7 +470,7 @@ impl<TSubstream> Discv5<TSubstream> {
                             current_response += 1;
                             self.active_rpc_requests.insert(req, Some(query_id.clone()));
                             self.active_nodes_responses
-                                .insert(node_id, current_response);
+                                .insert(node_id.clone(), current_response);
                         } else {
                             self.active_nodes_responses.remove(&node_id);
                         }
@@ -553,7 +561,7 @@ where
         // the addresses of that peer in the k-buckets.
 
         if let Some(node_id) = self.known_peer_ids.get(peer_id) {
-            let key = kbucket::Key::new(node_id.clone());
+            let key = kbucket::Key::from(node_id.clone());
             let mut out_list =
                 if let kbucket::Entry::Present(mut entry, _) = self.kbuckets.entry(&key) {
                     entry
@@ -655,7 +663,7 @@ where
                                 );
                             } else {
                                 // do not know of this peer
-                                debug!("Peer Id unknown, requesting ENR. NodeId: {:?}", src_id);
+                                debug!("NodeId unknown, requesting ENR. NodeId: {}", src_id);
                                 self.service.send_whoareyou(src, &src_id, 0, None, auth_tag)
                             }
                         }

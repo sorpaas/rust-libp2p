@@ -6,8 +6,8 @@
 /// encryption and key-derivation algorithms. Future versions may abstract some of these to allow
 /// for different algorithms.
 use crate::error::Discv5Error;
-use crate::packet::{AuthHeader, AuthResponse, AuthTag, NodeId, Nonce, Tag, NODE_ID_LENGTH};
-use enr::Enr;
+use crate::packet::{AuthHeader, AuthResponse, AuthTag, Nonce, Tag};
+use enr::{Enr, NodeId};
 use hkdf::Hkdf;
 use lazy_static::lazy_static;
 use libp2p_core::{identity::Keypair, PublicKey};
@@ -15,6 +15,7 @@ use openssl::symm::{decrypt_aead, encrypt_aead, Cipher};
 use rand::RngCore;
 use sha2::Sha256;
 
+const NODE_ID_LENGTH: usize = 32;
 const INFO_LENGTH: usize = 26 + 2 * NODE_ID_LENGTH;
 const KEY_LENGTH: usize = 16;
 const KEY_AGREEMENT_STRING: &'static str = "discovery v5 key agreement";
@@ -77,7 +78,7 @@ pub fn generate_session_keys(
     };
 
     let (initiator_key, responder_key, auth_resp_key) =
-        derive_key(&secret[..], local_id, &remote_enr.node_id, id_nonce)?;
+        derive_key(&secret[..], local_id, remote_enr.node_id(), id_nonce)?;
 
     Ok((initiator_key, responder_key, auth_resp_key, ephem_pk))
 }
@@ -91,8 +92,8 @@ fn derive_key(
 ) -> Result<(Key, Key, Key), Discv5Error> {
     let mut info = [0u8; INFO_LENGTH];
     info[0..26].copy_from_slice(KEY_AGREEMENT_STRING.as_bytes());
-    info[26..26 + NODE_ID_LENGTH].copy_from_slice(first_id);
-    info[26 + NODE_ID_LENGTH..].copy_from_slice(second_id);
+    info[26..26 + NODE_ID_LENGTH].copy_from_slice(&first_id.raw());
+    info[26 + NODE_ID_LENGTH..].copy_from_slice(&second_id.raw());
 
     let hk = Hkdf::<Sha256>::extract(Some(secret), id_nonce);
 
@@ -263,11 +264,11 @@ mod tests {
         let nonce: Nonce = rand::random();
 
         let (key1, key2, key3, pk) =
-            generate_session_keys(&node1_enr.node_id, &node2_enr, &nonce).unwrap();
+            generate_session_keys(node1_enr.node_id(), &node2_enr, &nonce).unwrap();
         let (key4, key5, key6) = derive_keys_from_pubkey(
             &node2_kp,
-            &node2_enr.node_id,
-            &node1_enr.node_id,
+            node2_enr.node_id(),
+            node1_enr.node_id(),
             &nonce,
             &pk,
         )

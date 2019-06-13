@@ -16,7 +16,6 @@ use log::debug;
 use rlp::Decodable;
 use std::default::Default;
 
-pub const NODE_ID_LENGTH: usize = 32;
 pub const TAG_LENGTH: usize = 32;
 const AUTH_TAG_LENGTH: usize = 12;
 pub const MAGIC_LENGTH: usize = 32;
@@ -26,8 +25,6 @@ pub const ID_NONCE_LENGTH: usize = 32;
 pub type AuthTag = [u8; AUTH_TAG_LENGTH];
 /// Packet Tag
 pub type Tag = [u8; TAG_LENGTH];
-/// ENR NodeId.
-pub type NodeId = [u8; NODE_ID_LENGTH];
 /// The nonce sent in a WHOAREYOU packet.
 pub type Nonce = [u8; ID_NONCE_LENGTH];
 
