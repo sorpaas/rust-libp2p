@@ -655,10 +655,6 @@ where
                                 self.handle_rpc_response(src_id, message.id, res)
                             }
                         },
-                        SessionEvent::UpdatedEnr(enr) => {
-                            debug!("ENR updated: {}", enr);
-                            self.add_enr(*enr);
-                        }
                         SessionEvent::WhoAreYouRequest {
                             src,
                             src_id,

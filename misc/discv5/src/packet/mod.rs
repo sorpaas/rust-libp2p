@@ -27,6 +27,8 @@ pub type AuthTag = [u8; AUTH_TAG_LENGTH];
 pub type Tag = [u8; TAG_LENGTH];
 /// The nonce sent in a WHOAREYOU packet.
 pub type Nonce = [u8; ID_NONCE_LENGTH];
+/// The magic packet.
+pub type Magic = [u8; MAGIC_LENGTH];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Packet {
@@ -190,15 +192,18 @@ impl Packet {
         }
 
         let enr_seq_bytes = decoded_list.pop().expect("List is long enough");
-        let mut enr_seq: [u8; 8] = Default::default();
-        enr_seq.clone_from_slice(&enr_seq_bytes);
-        let enr_seq = u64::from_be_bytes(enr_seq);
-
         let id_nonce_bytes = decoded_list.pop().expect("List is long enough");
+        let token_bytes = decoded_list.pop().expect("List is long enough");
+
+        if id_nonce_bytes.len() != ID_NONCE_LENGTH || token_bytes.len() != AUTH_TAG_LENGTH {
+            return Err(PacketError::InvalidByteSize);
+        }
+
+        let enr_seq = u64_from_be_vec(&enr_seq_bytes)?;
+
         let mut id_nonce: [u8; ID_NONCE_LENGTH] = Default::default();
         id_nonce.clone_from_slice(&id_nonce_bytes);
 
-        let token_bytes = decoded_list.pop().expect("List is long enough");
         let mut token: AuthTag = Default::default();
         token.clone_from_slice(&token_bytes);
 
@@ -250,7 +255,7 @@ impl Packet {
 
     /// Decode raw bytes into a packet. The `magic` value (SHA2256(node-id, b"WHOAREYOU")) is passed as a parameter to check for
     /// the magic byte sequence.
-    pub fn decode(data: &[u8], magic_data: &[u8]) -> Result<Self, PacketError> {
+    pub fn decode(data: &[u8], magic_data: &Magic) -> Result<Self, PacketError> {
         // ensure the packet is large enough to contain the correct headers
         if data.len() < TAG_LENGTH + AUTH_TAG_LENGTH {
             debug!("Packet length too small. Length: {}", data.len());
@@ -261,7 +266,9 @@ impl Packet {
         tag.clone_from_slice(&data[0..TAG_LENGTH]);
 
         // initially look for a WHOAREYOU packet
-        if &data[TAG_LENGTH..TAG_LENGTH + MAGIC_LENGTH] == magic_data {
+        if data.len() >= TAG_LENGTH + MAGIC_LENGTH
+            && &data[TAG_LENGTH..TAG_LENGTH + MAGIC_LENGTH] == magic_data
+        {
             return Packet::decode_whoareyou(tag, data);
         }
         // not a WHOAREYOU packet
@@ -294,12 +301,22 @@ impl Packet {
     }
 }
 
+fn u64_from_be_vec(data: &[u8]) -> Result<u64, PacketError> {
+    if data.len() > 8 {
+        return Err(PacketError::InvalidByteSize);
+    }
+    let mut val = [0u8; 8];
+    val[8 - data.len()..].copy_from_slice(data);
+    Ok(u64::from_be_bytes(val))
+}
+
 #[derive(Debug, Clone)]
 /// Types of packet errors.
 pub enum PacketError {
     UnknownFormat,
     UnknownPacket,
     TooSmall,
+    InvalidByteSize,
 }
 
 #[cfg(test)]
@@ -323,6 +340,7 @@ mod tests {
         //        let _ = simple_logger::init_with_level(log::Level::Debug);
         let tag = hash256_to_fixed_array("test-tag");
         let auth_tag: [u8; AUTH_TAG_LENGTH] = rand::random();
+        let random_magic: Magic = rand::random();
         let random_data: [u8; 44] = [17; 44];
 
         let packet = Packet::RandomPacket {
@@ -332,7 +350,7 @@ mod tests {
         };
 
         let encoded_packet = packet.encode();
-        let decoded_packet = Packet::decode(&encoded_packet, &random_data).unwrap();
+        let decoded_packet = Packet::decode(&encoded_packet, &random_magic).unwrap();
         let expected_packet = Packet::Message {
             tag,
             auth_tag,
@@ -345,7 +363,7 @@ mod tests {
     #[test]
     fn encode_decode_whoareyou_packet() {
         //        let _ = simple_logger::init_with_level(log::Level::Debug);
-        let tag = hash256_to_fixed_array("test-tag");
+        let tag = hash256_to_fixed_array("88484"); // has 2 0 leading bytes.
         let magic = hash256_to_fixed_array("magic");
         let id_nonce: [u8; ID_NONCE_LENGTH] = rand::random();
         let token: [u8; AUTH_TAG_LENGTH] = rand::random();

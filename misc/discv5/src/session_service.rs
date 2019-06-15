@@ -11,9 +11,7 @@
 //!
 //TODO: Document the Event structure and WHOAREYOU requests to the protocol layer.
 
-use super::packet::{
-    AuthHeader, AuthResponse, AuthTag, Nonce, Packet, Tag, MAGIC_LENGTH, TAG_LENGTH,
-};
+use super::packet::{AuthHeader, AuthResponse, AuthTag, Magic, Nonce, Packet, Tag, TAG_LENGTH};
 use super::service::Discv5Service;
 use crate::error::Discv5Error;
 use crate::rpc::{ProtocolMessage, RpcType};
@@ -87,7 +85,7 @@ impl SessionService {
             let mut hasher = Sha256::new();
             hasher.input(enr.node_id().raw());
             hasher.input(b"WHOAREYOU");
-            let mut magic = [0u8; MAGIC_LENGTH];
+            let mut magic: Magic = Default::default();
             magic.copy_from_slice(&hasher.result());
             magic
         };
@@ -733,9 +731,6 @@ pub enum SessionEvent {
         src: SocketAddr,
         message: Box<ProtocolMessage>,
     },
-
-    /// An ENR was updated for a node.
-    UpdatedEnr(Box<Enr>),
 
     /// A WHOAREYOU packet needs to be sent. This requests the protocol layer to send back the
     /// highest known ENR.
