@@ -268,7 +268,7 @@ impl<TSubstream> Discv5<TSubstream> {
                         if total < 5 && (current_response as u64) < total {
                             current_response += 1;
                             self.active_rpc_requests
-                                .insert(req, (Some(query_id.clone()), request.clone()));
+                                .insert(req, (Some(query_id), request.clone()));
                             self.active_nodes_responses
                                 .insert(node_id.clone(), current_response);
                         } else {
@@ -286,19 +286,24 @@ impl<TSubstream> Discv5<TSubstream> {
                             peer_key.log2_distance(&enr.node_id().clone().into())
                                 == Some(distance_requested)
                         });
-                        self.discovered(&query_id, &node_id, nodes);
+                        self.discovered(query_id, &node_id, nodes);
                     }
                 }
-                rpc::Response::Ping {
-                    enr_seq: _,
-                    ip,
-                    port,
-                } => {
+                rpc::Response::Ping { enr_seq, ip, port } => {
                     let socket = SocketAddr::new(ip, port);
-                    self.ip_votes.insert(node_id, socket);
+                    self.ip_votes.insert(node_id.clone(), socket);
                     if self.ip_votes.majority() != self.local_enr.udp_socket() {
                         debug!("Local IP Address updated to: {:?}", socket);
                         let _ = self.local_enr.set_udp_socket(socket, &self.keypair);
+                    }
+
+                    // check if we need to request a new ENR
+                    if let Some(enr) = self.find_enr(&node_id) {
+                        if enr.seq < enr_seq {
+                            // request an ENR update
+                            let req = rpc::Request::FindNode { distance: 0 };
+                            self.send_rpc_request(&node_id, req, None);
+                        }
                     }
                 }
                 _ => {} //TODO: Implement all RPC methods
@@ -392,7 +397,7 @@ impl<TSubstream> Discv5<TSubstream> {
     fn send_rpc_query(
         &mut self,
         query_id: QueryId,
-        query_info: &QueryInfo,
+        query_info: QueryInfo,
         return_peer: &ReturnPeer<NodeId>,
     ) {
         let node_id = return_peer.node_id.clone();
@@ -423,7 +428,7 @@ impl<TSubstream> Discv5<TSubstream> {
         if let Some(dst_enr) = self.find_enr(&node_id) {
             // Generate a random rpc_id which is matched per node id
             let id: u64 = rand::random();
-            let rpc_request = RpcRequest(id.clone(), node_id.clone());
+            let rpc_request = RpcRequest(id, node_id.clone());
 
             match self.service.send_message(
                 &dst_enr,
@@ -480,7 +485,7 @@ impl<TSubstream> Discv5<TSubstream> {
         self.next_query_id += 1;
 
         let target = QueryInfo {
-            query_type: query_type,
+            query_type,
             untrusted_enrs: Default::default(),
         };
 
@@ -502,7 +507,7 @@ impl<TSubstream> Discv5<TSubstream> {
     }
 
     /// Processes discovered peers from a query.
-    fn discovered(&mut self, query_id: &QueryId, source: &NodeId, peers: Vec<Enr>) {
+    fn discovered(&mut self, query_id: QueryId, source: &NodeId, peers: Vec<Enr>) {
         let local_id = self.local_enr.node_id();
         let others_iter = peers.into_iter().filter(|p| p.node_id() != local_id);
 
@@ -522,7 +527,7 @@ impl<TSubstream> Discv5<TSubstream> {
             }
         }
 
-        if let Some(query) = self.active_queries.get_mut(query_id) {
+        if let Some(query) = self.active_queries.get_mut(&query_id) {
             for peer in others_iter.clone() {
                 if query
                     .target_mut()
@@ -639,12 +644,7 @@ where
             let key = kbucket::Key::from(node_id.clone());
             let mut out_list =
                 if let kbucket::Entry::Present(mut entry, _) = self.kbuckets.entry(&key) {
-                    entry
-                        .value()
-                        .multiaddr()
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>()
+                    entry.value().multiaddr().to_vec()
                 } else {
                     Vec::new()
                 };
@@ -700,49 +700,46 @@ where
             self.events.shrink_to_fit();
 
             // Process events from the session service
-            loop {
-                match self.service.poll() {
-                    Async::Ready(event) => match event {
-                        SessionEvent::Established(node_id, enr) => {
-                            self.inject_session_established(node_id, enr);
+            while let Async::Ready(event) = self.service.poll() {
+                match event {
+                    SessionEvent::Established(node_id, enr) => {
+                        self.inject_session_established(node_id, enr);
+                    }
+                    SessionEvent::Message {
+                        src_id,
+                        src,
+                        message,
+                    } => match message.body {
+                        rpc::RpcType::Request(req) => {
+                            self.handle_rpc_request(src, src_id, message.id, req);
                         }
-                        SessionEvent::Message {
-                            src_id,
-                            src,
-                            message,
-                        } => match message.body {
-                            rpc::RpcType::Request(req) => {
-                                self.handle_rpc_request(src, src_id, message.id, req);
-                            }
-                            rpc::RpcType::Response(res) => {
-                                self.handle_rpc_response(src_id, message.id, res)
-                            }
-                        },
-                        SessionEvent::WhoAreYouRequest {
-                            src,
-                            src_id,
-                            auth_tag,
-                        } => {
-                            // check what our latest known ENR is for this node.
-                            if let Some(known_enr) = self.find_enr(&src_id) {
-                                self.service.send_whoareyou(
-                                    src,
-                                    &src_id,
-                                    known_enr.seq,
-                                    Some(known_enr.clone()),
-                                    auth_tag,
-                                );
-                            } else {
-                                // do not know of this peer
-                                debug!("NodeId unknown, requesting ENR. NodeId: {}", src_id);
-                                self.service.send_whoareyou(src, &src_id, 0, None, auth_tag)
-                            }
-                        }
-                        SessionEvent::RequestFailed(node_id, rpc_id) => {
-                            self.rpc_failure(node_id, rpc_id);
+                        rpc::RpcType::Response(res) => {
+                            self.handle_rpc_response(src_id, message.id, res)
                         }
                     },
-                    Async::NotReady => break,
+                    SessionEvent::WhoAreYouRequest {
+                        src,
+                        src_id,
+                        auth_tag,
+                    } => {
+                        // check what our latest known ENR is for this node.
+                        if let Some(known_enr) = self.find_enr(&src_id) {
+                            self.service.send_whoareyou(
+                                src,
+                                &src_id,
+                                known_enr.seq,
+                                Some(known_enr.clone()),
+                                auth_tag,
+                            );
+                        } else {
+                            // do not know of this peer
+                            debug!("NodeId unknown, requesting ENR. NodeId: {}", src_id);
+                            self.service.send_whoareyou(src, &src_id, 0, None, auth_tag)
+                        }
+                    }
+                    SessionEvent::RequestFailed(node_id, rpc_id) => {
+                        self.rpc_failure(node_id, rpc_id);
+                    }
                 }
             }
 
@@ -762,26 +759,24 @@ where
             // If a query is waiting for an rpc to send, store it here and stop looping.
             let mut waiting_query = None;
 
-            'queries_iter: for (&query_id, query) in self.active_queries.iter_mut() {
+            for (&query_id, query) in self.active_queries.iter_mut() {
                 let target = query.target().clone();
-                loop {
-                    match query.next() {
-                        QueryState::Finished => {
-                            finished_query = Some(query_id);
-                            break 'queries_iter;
-                        }
-                        QueryState::Waiting(Some(return_peer)) => {
-                            // break the loop to send the rpc request
-                            waiting_query = Some((query_id, target, return_peer));
-                            break 'queries_iter;
-                        }
-                        QueryState::Waiting(None) | QueryState::WaitingAtCapacity => break,
+                match query.next() {
+                    QueryState::Finished => {
+                        finished_query = Some(query_id);
+                        break;
                     }
+                    QueryState::Waiting(Some(return_peer)) => {
+                        // break the loop to send the rpc request
+                        waiting_query = Some((query_id, target, return_peer));
+                        break;
+                    }
+                    QueryState::Waiting(None) | QueryState::WaitingAtCapacity => (),
                 }
             }
 
             if let Some((query_id, target, return_peer)) = waiting_query {
-                self.send_rpc_query(query_id, &target, &return_peer);
+                self.send_rpc_query(query_id, target, &return_peer);
             } else if let Some(finished_query) = finished_query {
                 let result = self
                     .active_queries
@@ -802,14 +797,11 @@ where
                 // check for ping intervals
                 let mut to_send_ping = Vec::new();
                 for (node_id, interval) in self.connected_peers.iter_mut() {
-                    loop {
-                        match interval.poll() {
-                            Ok(Async::Ready(_)) => to_send_ping.push(node_id.clone()),
-                            _ => break,
-                        }
+                    while let Ok(Async::Ready(_)) = interval.poll() {
+                        to_send_ping.push(node_id.clone());
                     }
                 }
-
+                to_send_ping.dedup();
                 for id in to_send_ping.into_iter() {
                     debug!("Sending PING to: {}", id);
                     self.send_ping(&id);

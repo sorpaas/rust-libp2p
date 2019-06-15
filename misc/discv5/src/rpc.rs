@@ -205,7 +205,7 @@ impl ProtocolMessage {
                 Response::Nodes { total, nodes } => {
                     buf.push(msg_type);
                     let enr_list: Vec<Vec<u8>> =
-                        nodes.into_iter().cloned().map(|enr| enr.encode()).collect();
+                        nodes.iter().cloned().map(|enr| enr.encode()).collect();
                     let rlp_enr_list = rlp::encode_list::<Vec<u8>, Vec<u8>>(&enr_list);
                     buf.extend_from_slice(&rlp::encode_list::<Vec<u8>, Vec<u8>>(&[
                         id,
@@ -227,7 +227,7 @@ impl ProtocolMessage {
                     buf.push(msg_type);
                     buf.extend_from_slice(&rlp::encode_list::<Vec<u8>, Vec<u8>>(&[
                         id,
-                        vec![registered.clone() as u8],
+                        vec![*registered as u8],
                     ]));
                     buf
                 }
@@ -380,10 +380,7 @@ impl ProtocolMessage {
                 if registered_bytes.len() != 1 {
                     return Err(DecodingError::InvalidValue);
                 }
-                let mut registered = false;
-                if registered_bytes[0] == 1 {
-                    registered = true;
-                }
+                let registered = registered_bytes[0] == 1;
                 RpcType::Response(Response::RegisterTopic { registered })
             }
             9 => {

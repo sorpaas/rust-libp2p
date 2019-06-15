@@ -136,7 +136,7 @@ impl SessionService {
                 let msgs = self
                     .pending_messages
                     .entry(dst_id.clone())
-                    .or_insert_with(|| Vec::new());
+                    .or_insert_with(Vec::new);
                 msgs.push(message);
                 return Ok(());
             }
@@ -149,7 +149,7 @@ impl SessionService {
                 let msgs = self
                     .pending_messages
                     .entry(dst_id.clone())
-                    .or_insert_with(|| Vec::new());
+                    .or_insert_with(Vec::new);
                 msgs.push(message);
 
                 // need to establish a new session, send a random packet
@@ -286,10 +286,11 @@ impl SessionService {
         })?;
 
         // update the enr record if we need need to
-        let mut updated_enr = None;
-        if enr_seq < self.enr.seq {
-            updated_enr = Some(self.enr.clone());
-        }
+        let updated_enr = if enr_seq < self.enr.seq {
+            Some(self.enr.clone())
+        } else {
+            None
+        };
 
         // generate the auth response to be encrypted
         let auth_pt = AuthResponse::new(&sig, updated_enr).encode();
@@ -500,7 +501,6 @@ impl SessionService {
                 Some(s) if s.established() => s,
                 _ => {
                     // no session
-                    debug_assert!(false);
                     return Err(());
                 }
             };
@@ -553,11 +553,7 @@ impl SessionService {
                 self.whoareyou_requests.insert(node_id.clone(), request);
             }
             _ => {
-                let auth_tag = request
-                    .packet
-                    .auth_tag()
-                    .expect("Must have an auth_tag")
-                    .clone();
+                let auth_tag = *request.packet.auth_tag().expect("Must have an auth_tag");
                 self.pending_requests.insert(auth_tag, request);
             }
         }

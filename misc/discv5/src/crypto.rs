@@ -18,8 +18,8 @@ use sha2::Sha256;
 const NODE_ID_LENGTH: usize = 32;
 const INFO_LENGTH: usize = 26 + 2 * NODE_ID_LENGTH;
 const KEY_LENGTH: usize = 16;
-const KEY_AGREEMENT_STRING: &'static str = "discovery v5 key agreement";
-const KNOWN_SCHEME: &'static str = "gsm";
+const KEY_AGREEMENT_STRING: &str = "discovery v5 key agreement";
+const KNOWN_SCHEME: &str = "gsm";
 
 type Key = [u8; KEY_LENGTH];
 
@@ -156,7 +156,7 @@ pub fn decrypt_authentication_header(
     tag: &Tag,
 ) -> Result<AuthResponse, Discv5Error> {
     if header.auth_scheme_name != KNOWN_SCHEME {
-        return Err(Discv5Error::Custom("Invalid authentication scheme".into()));
+        return Err(Discv5Error::Custom("Invalid authentication scheme"));
     }
 
     // decrypt the auth-response
@@ -216,7 +216,7 @@ pub fn encrypt_with_header(
 
     // get the rlp_encoded auth_header
     let auth_tag: [u8; 12] = rand::random();
-    let auth_header = AuthHeader::new(auth_tag, ephem_pubkey.to_vec(), Box::new(ciphertext));
+    let auth_header = AuthHeader::new(auth_tag, ephem_pubkey.to_vec(), ciphertext);
 
     let mut auth_data = tag.to_vec();
     auth_data.append(&mut auth_header.encode());

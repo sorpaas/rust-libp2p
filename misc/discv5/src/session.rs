@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use tokio::timer::Delay;
 use zeroize::Zeroize;
 
-const WHOAREYOU_STRING: &'static str = "WHOAREYOU";
-const NONCE_STRING: &'static str = "discovery-id-nonce";
+const WHOAREYOU_STRING: &str = "WHOAREYOU";
+const NONCE_STRING: &str = "discovery-id-nonce";
 
 //TODO: This is short for testing.
 const SESSION_TIMEOUT: u64 = 30;
@@ -97,7 +97,7 @@ impl Session {
             Packet::WhoAreYou {
                 tag,
                 magic,
-                token: auth_tag.clone(),
+                token: auth_tag,
                 id_nonce,
                 enr_seq,
             }
@@ -153,7 +153,7 @@ impl Session {
         Ok(Packet::Message {
             tag,
             auth_tag,
-            message: Box::new(cipher),
+            message: cipher,
         })
     }
 
@@ -179,9 +179,9 @@ impl Session {
         )?;
 
         Ok(Packet::AuthMessage {
-            tag: tag,
+            tag,
             auth_header,
-            message: Box::new(ciphertext),
+            message: ciphertext,
         })
     }
 

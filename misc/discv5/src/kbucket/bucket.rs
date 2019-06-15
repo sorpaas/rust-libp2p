@@ -261,7 +261,7 @@ where
             }
         }
 
-        return None;
+        None
     }
 
     /// Updates the status of the pending node, if any.

@@ -21,11 +21,11 @@ pub struct AuthHeader {
     pub ephemeral_pubkey: Vec<u8>,
 
     /// Authentication response.
-    pub auth_response: Box<Vec<u8>>,
+    pub auth_response: Vec<u8>,
 }
 
 impl AuthHeader {
-    pub fn new(auth_tag: AuthTag, ephemeral_pubkey: Vec<u8>, resp: Box<Vec<u8>>) -> Self {
+    pub fn new(auth_tag: AuthTag, ephemeral_pubkey: Vec<u8>, resp: Vec<u8>) -> Self {
         AuthHeader {
             auth_tag,
             auth_scheme_name: AUTH_SCHEME_NAME,
@@ -83,10 +83,10 @@ impl Decodable for AuthResponse {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
         if !rlp.is_list() {
             let signature = rlp.decoder().decode_value(|bytes| Ok(bytes.to_vec()))?;
-            return Ok(AuthResponse {
+            Ok(AuthResponse {
                 signature,
                 updated_enr: None,
-            });
+            })
         } else {
             let mut list = rlp.as_list::<Vec<u8>>().map_err(|e| {
                 dbg!(e);
@@ -178,7 +178,7 @@ impl Decodable for AuthHeader {
             auth_tag,
             auth_scheme_name: "gsm",
             ephemeral_pubkey,
-            auth_response: Box::new(auth_response),
+            auth_response,
         })
     }
 }

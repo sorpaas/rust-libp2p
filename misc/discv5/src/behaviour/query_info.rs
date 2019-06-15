@@ -30,7 +30,7 @@ pub enum QueryType {
 impl QueryInfo {
     /// Builds an RPC Request
     pub fn into_rpc_request(
-        &self,
+        self,
         return_peer: &ReturnPeer<NodeId>,
     ) -> Result<Request, &'static str> {
         let request = match &self.query_type {

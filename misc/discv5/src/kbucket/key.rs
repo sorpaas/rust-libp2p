@@ -96,7 +96,7 @@ impl<T> Key<T> {
     /// key. The output returns None if the key's are identical. The range is 1-256.
     pub fn log2_distance<U>(&self, other: &Key<U>) -> Option<u64> {
         let xor_dist = self.distance(other);
-        let log_dist = 256 - xor_dist.0.leading_zeros() as u64;
+        let log_dist = u64::from(256 - xor_dist.0.leading_zeros());
         if log_dist == 0 {
             None
         } else {

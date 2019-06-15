@@ -41,7 +41,7 @@ pub enum Packet {
         auth_tag: AuthTag,
 
         /// At least 44 bytes of random data.
-        data: Box<Vec<u8>>,
+        data: Vec<u8>,
     },
     /// Handshake packet to establish identities.
     WhoAreYou {
@@ -69,7 +69,7 @@ pub enum Packet {
         auth_header: AuthHeader,
 
         /// The encrypted message including the authentication header.
-        message: Box<Vec<u8>>,
+        message: Vec<u8>,
     },
     /// A standard discv5 message.
     Message {
@@ -80,7 +80,7 @@ pub enum Packet {
         auth_tag: AuthTag,
 
         /// The encrypted message as raw bytes.
-        message: Box<Vec<u8>>,
+        message: Vec<u8>,
     },
 }
 
@@ -88,7 +88,6 @@ impl Packet {
     /// Generates a Packet::Random given a `tag`.
     pub fn random(tag: Tag) -> Packet {
         let data: Vec<u8> = (0..44).map(|_| rand::random::<u8>()).collect();
-        let data = Box::new(data);
 
         Packet::RandomPacket {
             tag,
@@ -207,18 +206,18 @@ impl Packet {
         let mut token: AuthTag = Default::default();
         token.clone_from_slice(&token_bytes);
 
-        return Ok(Packet::WhoAreYou {
+        Ok(Packet::WhoAreYou {
             tag,
             magic,
             token,
             id_nonce,
             enr_seq,
-        });
+        })
     }
 
     /// Decodes a regular message into a `Packet`.
     fn decode_standard_message(tag: Tag, data: &[u8]) -> Result<Self, PacketError> {
-        let rlp = rlp::Rlp::new(&data[TAG_LENGTH..TAG_LENGTH + AUTH_TAG_LENGTH + 1]);
+        let rlp = rlp::Rlp::new(&data[TAG_LENGTH..=TAG_LENGTH + AUTH_TAG_LENGTH]);
         let auth_tag_bytes: Vec<u8> = match rlp.as_val() {
             Ok(v) => v,
             Err(_) => {
@@ -230,11 +229,11 @@ impl Packet {
         let mut auth_tag: AuthTag = Default::default();
         auth_tag.clone_from_slice(&auth_tag_bytes);
 
-        return Ok(Packet::Message {
+        Ok(Packet::Message {
             tag,
             auth_tag,
-            message: Box::new(data[TAG_LENGTH + AUTH_TAG_LENGTH + 1..].to_vec()),
-        });
+            message: data[TAG_LENGTH + AUTH_TAG_LENGTH + 1..].to_vec(),
+        })
     }
 
     /// Decodes a message that contains an authentication header.
@@ -244,13 +243,13 @@ impl Packet {
             AuthHeader::decode(&auth_header_rlp).map_err(|_| PacketError::UnknownFormat)?;
 
         let message_start = TAG_LENGTH + rlp_length;
-        let message = Box::new(data[message_start..].to_vec());
+        let message = data[message_start..].to_vec();
 
-        return Ok(Packet::AuthMessage {
+        Ok(Packet::AuthMessage {
             tag,
             auth_header,
             message,
-        });
+        })
     }
 
     /// Decode raw bytes into a packet. The `magic` value (SHA2256(node-id, b"WHOAREYOU")) is passed as a parameter to check for
@@ -346,7 +345,7 @@ mod tests {
         let packet = Packet::RandomPacket {
             tag: tag.clone(),
             auth_tag: auth_tag.clone(),
-            data: Box::new(random_data.to_vec()),
+            data: random_data.to_vec(),
         };
 
         let encoded_packet = packet.encode();
@@ -354,7 +353,7 @@ mod tests {
         let expected_packet = Packet::Message {
             tag,
             auth_tag,
-            message: Box::new(random_data.to_vec()),
+            message: random_data.to_vec(),
         };
 
         assert_eq!(decoded_packet, expected_packet);
@@ -394,7 +393,7 @@ mod tests {
             .public()
             .into_protobuf_encoding();
         let auth_response: [u8; 32] = rand::random();
-        let auth_response = Box::new(auth_response.to_vec());
+        let auth_response = auth_response.to_vec();
 
         let auth_header = AuthHeader {
             auth_tag,
@@ -404,7 +403,7 @@ mod tests {
         };
 
         let message: [u8; 16] = rand::random();
-        let message = Box::new(message.to_vec());
+        let message = message.to_vec();
 
         let packet = Packet::AuthMessage {
             tag,
