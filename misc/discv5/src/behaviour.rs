@@ -10,7 +10,7 @@ use crate::rpc;
 use crate::service::MAX_PACKET_SIZE;
 use crate::session_service::{SessionEvent, SessionService};
 use enr::{Enr, NodeId};
-use fnv::{FnvHashMap, FnvHashSet};
+use fnv::FnvHashMap;
 use futures::prelude::*;
 use libp2p_core::identity::Keypair;
 use libp2p_core::swarm::{
@@ -21,12 +21,13 @@ use libp2p_core::{
     protocols_handler::{DummyProtocolsHandler, ProtocolsHandler},
     PeerId,
 };
-use log::{debug, error, warn};
+use log::{debug, error, trace, warn};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::{marker::PhantomData, time::Duration};
+use tokio::timer::Interval;
 use tokio_io::{AsyncRead, AsyncWrite};
 
 mod ip_vote;
@@ -70,8 +71,8 @@ pub struct Discv5<TSubstream> {
     /// A map of votes nodes have made about our external IP address. We accept the majority.
     ip_votes: IpVote,
 
-    /// List of peers we have established sessions with.
-    connected_peers: FnvHashSet<NodeId>,
+    /// List of peers we have established sessions with and an interval for when to send a PING.
+    connected_peers: HashMap<NodeId, Interval>,
 
     /// The configuration for iterative queries.
     query_config: QueryConfig,
@@ -81,6 +82,9 @@ pub struct Discv5<TSubstream> {
 
     /// Main discv5 UDP service that establishes sessions with peers.
     service: SessionService,
+
+    /// The time between pings to ensure connectivity amongst connected nodes.
+    ping_delay: Duration,
 
     /// Marker to pin the generics.
     marker: PhantomData<TSubstream>,
@@ -114,6 +118,7 @@ impl<TSubstream> Discv5<TSubstream> {
             next_query_id: 0,
             query_config,
             service,
+            ping_delay: Duration::from_secs(300),
             marker: PhantomData,
         })
     }
@@ -184,6 +189,11 @@ impl<TSubstream> Discv5<TSubstream> {
         return_peer: &ReturnPeer<NodeId>,
     ) {
         let node_id = return_peer.node_id.clone();
+        trace!(
+            "Sending query. Iteration: {}, NodeId: {}",
+            return_peer.iteration,
+            node_id
+        );
 
         let req = match query_info.into_rpc_request(return_peer) {
             Ok(r) => r,
@@ -245,7 +255,7 @@ impl<TSubstream> Discv5<TSubstream> {
         };
 
         // How many times to call the rpc per node.
-        // FINDNODE requires multiple iterations
+        // FINDNODE requires multiple iterations as it requests a specific distance.
         let query_iterations = target.iterations();
 
         let target_key: kbucket::Key<QueryInfo> = target.clone().into();
@@ -263,7 +273,7 @@ impl<TSubstream> Discv5<TSubstream> {
 
     /// Processes discovered peers from a query.
     fn discovered(&mut self, query_id: &QueryId, source: &NodeId, peers: Vec<Enr>) {
-        let local_id = self.kbuckets.local_key().preimage();
+        let local_id = self.local_enr.node_id();
         let others_iter = peers.into_iter().filter(|p| p.node_id() != local_id);
 
         for peer in others_iter.clone() {
@@ -289,7 +299,7 @@ impl<TSubstream> Discv5<TSubstream> {
         }
     }
 
-    /// Update the connection status of a peer in the Kademlia routing table.
+    /// Update the connection status of a node in the routing table.
     fn connection_updated(&mut self, node_id: NodeId, enr: Option<Enr>, new_status: NodeStatus) {
         let key = kbucket::Key::from(node_id.clone());
         // add the known PeerId
@@ -333,7 +343,7 @@ impl<TSubstream> Discv5<TSubstream> {
                             kbucket::InsertResult::Pending { disconnected } => {
                                 debug_assert!(!self
                                     .connected_peers
-                                    .contains(disconnected.preimage()));
+                                    .contains_key(disconnected.preimage()));
                                 self.send_ping(&disconnected.into_preimage());
                             }
                         }
@@ -349,25 +359,11 @@ impl<TSubstream> Discv5<TSubstream> {
     fn inject_session_established(&mut self, node_id: NodeId, enr: Enr) {
         self.known_peer_ids.insert(enr.peer_id(), node_id.clone());
         self.connection_updated(node_id.clone(), Some(enr), NodeStatus::Connected);
-        self.connected_peers.insert(node_id);
+        // send an initial ping and start the ping interval
+        self.send_ping(&node_id);
+        let interval = Interval::new_interval(self.ping_delay);
+        self.connected_peers.insert(node_id, interval);
     }
-
-    /* RPC Failure handles disconnection
-    /// A session could not be established for the given `NodeId`.
-    fn session_not_established(&mut self, node_id: NodeId) {
-        // remove the node from untrusted addresses
-        for query in self.active_queries.values_mut() {
-            query
-                .target_mut()
-                .untrusted_enrs
-                .retain(|e| e.node_id != node_id);
-        }
-
-        // a seperate call for RPC failure will occur to handle active queries awaiting a
-        // response
-        self.connection_updated(node_id.clone(), None, NodeStatus::Disconnected);
-    }
-    */
 
     /// A session could not be established or an RPC request timed-out (after a few retries).
     fn rpc_failure(&mut self, node_id: NodeId, failed_rpc_id: RpcId) {
@@ -485,6 +481,7 @@ impl<TSubstream> Discv5<TSubstream> {
                     let socket = SocketAddr::new(ip, port);
                     self.ip_votes.insert(node_id, socket);
                     if self.ip_votes.majority() != self.local_enr.udp_socket() {
+                        debug!("Local IP Address updated to: {:?}", socket);
                         let _ = self.local_enr.set_udp_socket(socket, &self.keypair);
                     }
                 }
@@ -511,37 +508,52 @@ fn send_nodes_response(
     enr: &Enr,
     nodes: Vec<EntryRefView<NodeId, Enr>>,
 ) {
-    // build the NODES response
-    let mut to_send_nodes: Vec<Vec<Enr>> = Vec::new();
-    let mut total_size = 0;
-    let mut rpc_index = 0;
-    to_send_nodes.push(Vec::new());
-    for entry in nodes.into_iter() {
-        if entry.node.value.size() + total_size < MAX_PACKET_SIZE - 80 {
-            total_size += entry.node.value.size();
-            to_send_nodes[rpc_index].push(entry.node.value.clone());
-        } else {
-            total_size = entry.node.value.size();
-            to_send_nodes.push(vec![entry.node.value.clone()]);
-            rpc_index += 1;
-        }
-    }
-
-    let responses: Vec<rpc::ProtocolMessage> = to_send_nodes
-        .into_iter()
-        .map(|nodes| rpc::ProtocolMessage {
+    trace!("Sending FINDNODES response");
+    // if there are no nodes, send an empty response
+    if nodes.is_empty() {
+        let response = rpc::ProtocolMessage {
             id: rpc_id,
             body: rpc::RpcType::Response(rpc::Response::Nodes {
-                total: rpc_index as u64,
-                nodes,
+                total: 1u64,
+                nodes: Vec::new(),
             }),
-        })
-        .collect();
-
-    for response in responses {
+        };
         let _ = service
             .send_message(enr, response, Some(dst))
             .map_err(|e| warn!("Failed to send a FINDNODES response. Error: {:?}", e));
+    } else {
+        // build the NODES response
+        let mut to_send_nodes: Vec<Vec<Enr>> = Vec::new();
+        let mut total_size = 0;
+        let mut rpc_index = 0;
+        to_send_nodes.push(Vec::new());
+        for entry in nodes.into_iter() {
+            if entry.node.value.size() + total_size < MAX_PACKET_SIZE - 80 {
+                total_size += entry.node.value.size();
+                to_send_nodes[rpc_index].push(entry.node.value.clone());
+            } else {
+                total_size = entry.node.value.size();
+                to_send_nodes.push(vec![entry.node.value.clone()]);
+                rpc_index += 1;
+            }
+        }
+
+        let responses: Vec<rpc::ProtocolMessage> = to_send_nodes
+            .into_iter()
+            .map(|nodes| rpc::ProtocolMessage {
+                id: rpc_id,
+                body: rpc::RpcType::Response(rpc::Response::Nodes {
+                    total: (rpc_index + 1) as u64,
+                    nodes,
+                }),
+            })
+            .collect();
+
+        for response in responses {
+            let _ = service
+                .send_message(enr, response, Some(dst))
+                .map_err(|e| warn!("Failed to send a FINDNODES response. Error: {:?}", e));
+        }
     }
 }
 
@@ -618,7 +630,7 @@ where
         >,
     > {
         loop {
-            // Drain queued events first.
+            // Drain queued events
             if !self.events.is_empty() {
                 return Async::Ready(NetworkBehaviourAction::GenerateEvent(self.events.remove(0)));
             }
@@ -728,6 +740,22 @@ where
                     }
                 }
             } else {
+                // check for ping intervals
+                let mut to_send_ping = Vec::new();
+                for (node_id, interval) in self.connected_peers.iter_mut() {
+                    loop {
+                        match interval.poll() {
+                            Ok(Async::Ready(_)) => to_send_ping.push(node_id.clone()),
+                            _ => break,
+                        }
+                    }
+                }
+
+                for id in to_send_ping.into_iter() {
+                    debug!("Sending PING to: {}", id);
+                    self.send_ping(&id);
+                }
+
                 return Async::NotReady;
             }
         }

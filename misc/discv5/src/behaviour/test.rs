@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use crate::{Discv5, Discv5Event};
+use env_logger;
 use libp2p_core::{
     identity,
     muxing::StreamMuxerBox,
@@ -8,7 +9,6 @@ use libp2p_core::{
     transport::{boxed::Boxed, MemoryTransport},
     upgrade, PeerId, Swarm, Transport,
 };
-use simple_logger;
 use tokio::prelude::*;
 
 use enr::NodeId;
@@ -22,6 +22,10 @@ use tokio::runtime::Runtime;
 
 type SwarmType =
     Swarm<Boxed<(PeerId, StreamMuxerBox), io::Error>, Discv5<Substream<StreamMuxerBox>>>;
+
+fn init() {
+    let _ = env_logger::builder().is_test(true).try_init();
+}
 
 fn build_swarms(n: usize) -> Vec<SwarmType> {
     let base_port = 10000u16;
@@ -58,9 +62,9 @@ fn build_swarms(n: usize) -> Vec<SwarmType> {
 
 #[test]
 fn test_findnode_query() {
-    let _ = simple_logger::init_with_level(log::Level::Debug);
+    init();
     // build a collection of 10 nodes
-    let node_num = 3;
+    let node_num = 8;
     let mut swarms = build_swarms(node_num);
     let node_enrs: Vec<Enr> = swarms.iter().map(|n| n.local_enr().clone()).collect();
 
@@ -88,20 +92,16 @@ fn test_findnode_query() {
     Runtime::new()
         .unwrap()
         .block_on(future::poll_fn(move || -> Result<_, io::Error> {
-            for (i, swarm) in swarms.iter_mut().enumerate() {
+            for swarm in swarms.iter_mut() {
                 loop {
                     match swarm.poll().unwrap() {
                         Async::Ready(Some(Discv5Event::FindNodeResult { key, closer_peers })) => {
-                            println!("Search key: {}, node_ids:{:?}", key, closer_peers);
+                            println!("Query Completed: {:?}", closer_peers);
+                            assert_eq!(key, target_random_node_id);
+                            assert!(expected_node_ids.iter().all(|n| closer_peers.contains(n)));
                             return Ok(Async::Ready(()));
                         }
-                        Async::Ready(Some(Discv5Event::EnrAdded { enr, .. })) => {
-                            println!("Enr added, NodeId:{}", enr.node_id());
-                        }
-                        Async::Ready(Some(event)) => {
-                            println!("Event received: {:?}", event);
-                        }
-                        Async::Ready(_) => {}
+                        Async::Ready(_) => (),
                         Async::NotReady => break,
                     }
                 }

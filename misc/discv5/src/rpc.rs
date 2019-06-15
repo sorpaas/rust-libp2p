@@ -33,6 +33,55 @@ pub enum Response {
     RegisterTopic { registered: bool },
 }
 
+impl std::fmt::Display for RpcType {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            RpcType::Request(request) => write!(f, "{:?}", request),
+            RpcType::Response(response) => write!(f, "{}", response),
+        }
+    }
+}
+
+impl std::fmt::Display for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Response::Ping { enr_seq, ip, port } => write!(
+                f,
+                "PING Response: Enr-seq: {}, Ip: {:?},  Port: {}",
+                enr_seq, ip, port
+            ),
+            Response::Nodes { total, nodes } => {
+                let _ = write!(f, "NODES Response: total: {}, Nodes: [", total);
+                let mut first = true;
+                for id in nodes {
+                    if !first {
+                        write!(f, ", {}", id)?;
+                    } else {
+                        write!(f, "{}", id)?;
+                    }
+                    first = false;
+                }
+
+                write!(f, "]")
+            }
+            Response::Ticket { ticket, wait_time } => write!(
+                f,
+                "TICKET Response: Ticket: {:?}, Wait time: {}",
+                ticket, wait_time
+            ),
+            Response::RegisterTopic { registered } => {
+                write!(f, "REGTOPIC Response: Registered: {}", registered)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for ProtocolMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Message: Id: {}, Body: {}", self.id, self.body)
+    }
+}
+
 impl ProtocolMessage {
     pub fn msg_type(&self) -> u8 {
         match &self.body {

@@ -344,15 +344,13 @@ impl Enr {
 
 impl std::fmt::Display for Enr {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.debug_struct("ENR")
-            .field("NodeId", &self.node_id())
-            //.field("PeerId", self.peer_id().to_base(58))
-            .field("seq", &self.seq)
-            .field("ip", &self.ip())
-            .field("tcp", &self.tcp())
-            .field("udp", &self.udp())
-            .field("public key", &self.public_key())
-            .finish()
+        write!(
+            f,
+            "ENR: NodeId: {}, PeerId: {}, Socket: {:?}",
+            self.node_id(),
+            self.peer_id(),
+            self.udp_socket()
+        )
     }
 }
 

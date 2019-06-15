@@ -39,9 +39,9 @@ fnv = "1.0.6"
 arrayvec = "0.4.10"
 
 [dev-dependencies]
-simple_logger = "1.0.1"
 tokio-timer = "0.2.11"
 tokio = "0.1.20"
 quickcheck = "0.8"
 libp2p-secio = { version = "0.8.0", path = "../../protocols/secio" }
 libp2p-yamux = { version = "0.8.0", path = "../../muxers/yamux" }
+env_logger = "0.6.1"

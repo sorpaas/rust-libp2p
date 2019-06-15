@@ -4,7 +4,8 @@
 //! messages. These messages are defined in the `Packet` module.
 
 use super::packet::{Packet, MAGIC_LENGTH};
-use futures::prelude::*;
+use futures::{prelude::*, task};
+use log::{debug, trace};
 use std::io;
 use std::net::SocketAddr;
 use tokio_udp::UdpSocket;
@@ -43,11 +44,12 @@ impl Discv5Service {
         self.send_queue.push((to, packet));
     }
 
-    /// Drive reading/writting to the UDP socket.
+    /// Drive reading/writing to the UDP socket.
     pub fn poll(&mut self) -> Async<(SocketAddr, Packet)> {
         // send messages
         while !self.send_queue.is_empty() {
             let (dst, packet) = self.send_queue.remove(0);
+            //trace!("Sending packet to socket. Packet: {:?}", packet);
 
             match self.socket.poll_send_to(&packet.encode(), &dst) {
                 Ok(Async::Ready(bytes_written)) => {
@@ -55,7 +57,10 @@ impl Discv5Service {
                 }
                 Ok(Async::NotReady) => {
                     // didn't write add back and break
+                    debug!("Couldn't write to socket");
                     self.send_queue.insert(0, (dst, packet));
+                    // notify to try again
+                    task::current().notify();
                     break;
                 }
                 Err(_) => {

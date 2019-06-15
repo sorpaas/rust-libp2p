@@ -19,6 +19,7 @@ const NODE_ID_LENGTH: usize = 32;
 const INFO_LENGTH: usize = 26 + 2 * NODE_ID_LENGTH;
 const KEY_LENGTH: usize = 16;
 const KEY_AGREEMENT_STRING: &'static str = "discovery v5 key agreement";
+const KNOWN_SCHEME: &'static str = "gsm";
 
 type Key = [u8; KEY_LENGTH];
 
@@ -149,14 +150,12 @@ pub fn derive_keys_from_pubkey(
 /// Verifies the encoding and nonce signature given in the authentication header. If
 /// the header contains an updated ENR, it is returned.
 #[inline]
-pub fn verify_authentication_header(
+pub fn decrypt_authentication_header(
     auth_resp_key: &Key,
-    generated_nonce: &[u8],
     header: &AuthHeader,
     tag: &Tag,
-    remote_public_key: &PublicKey,
-) -> Result<Option<Enr>, Discv5Error> {
-    if header.auth_scheme_name != "gsm" {
+) -> Result<AuthResponse, Discv5Error> {
+    if header.auth_scheme_name != KNOWN_SCHEME {
         return Err(Discv5Error::Custom("Invalid authentication scheme".into()));
     }
 
@@ -165,12 +164,17 @@ pub fn verify_authentication_header(
     let auth_response = rlp::decode::<AuthResponse>(&rlp_auth_response)
         .map_err(|_| Discv5Error::Custom("Invalid auth response format"))?;
 
-    // verify the nonce signature
-    if !remote_public_key.verify(&generated_nonce, &auth_response.signature) {
-        return Err(Discv5Error::InvalidSignature);
-    }
+    Ok(auth_response)
+}
 
-    Ok(auth_response.updated_enr)
+/// Verifies the authentication header nonce.
+pub fn verify_authentication_nonce(
+    remote_public_key: &PublicKey,
+    generated_nonce: &[u8],
+    sig: &[u8],
+) -> bool {
+    // verify the nonce signature
+    remote_public_key.verify(&generated_nonce, sig)
 }
 
 /// Decrypt messages that are post-fixed with an authenticated MAC.

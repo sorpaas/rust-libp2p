@@ -18,6 +18,7 @@ use enr::{Enr, NodeId};
 use libp2p_core::identity::Keypair;
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
+use tokio::timer::Delay;
 use zeroize::Zeroize;
 
 const WHOAREYOU_STRING: &'static str = "WHOAREYOU";
@@ -31,7 +32,7 @@ pub struct Session {
     remote_enr: Option<Enr>,       // can be None for WHOAREYOU sessions.
     ephem_pubkey: Option<Vec<u8>>, // ephemeral key is stored as encoded bytes
     keys: Keys,
-    timeout: Option<Instant>,
+    timeout: Option<Delay>,
 }
 
 #[derive(Zeroize)]
@@ -135,7 +136,9 @@ impl Session {
             decryption_key,
         };
 
-        self.timeout = Some(Instant::now() + Duration::from_secs(SESSION_TIMEOUT));
+        self.timeout = Some(Delay::new(
+            Instant::now() + Duration::from_secs(SESSION_TIMEOUT),
+        ));
 
         self.status = SessionStatus::Established;
         Ok(())
@@ -193,28 +196,59 @@ impl Session {
         tag: Tag,
         local_keypair: &Keypair,
         local_id: &NodeId,
+        remote_id: &NodeId,
         id_nonce: Nonce,
         auth_header: &AuthHeader,
     ) -> Result<Option<Enr>, Discv5Error> {
         // generate session keys
-        let remote_enr = self.remote_enr.as_ref().expect("Remote ENR must exist");
 
         let (decryption_key, encryption_key, auth_resp_key) = crypto::derive_keys_from_pubkey(
             local_keypair,
             local_id,
-            remote_enr.node_id(),
+            remote_id,
             &id_nonce,
             &auth_header.ephemeral_pubkey,
         )?;
 
-        // verify the authentication header
-        let updated_enr = crypto::verify_authentication_header(
-            &auth_resp_key,
+        // decrypt the authentication header
+        let auth_response =
+            crypto::decrypt_authentication_header(&auth_resp_key, auth_header, &tag)?;
+
+        // to inform if we have updated the ENR record of the session.
+        let mut updated_enr = None;
+
+        // check and verify a potential ENR update
+        if let Some(enr) = auth_response.updated_enr {
+            if let Some(remote_enr) = &self.remote_enr {
+                // verify the enr-seq number
+                if remote_enr.seq < enr.seq {
+                    self.remote_enr = Some(enr.clone());
+                    updated_enr = self.remote_enr.clone();
+                } // ignore ENR's that have a lower seq number
+            } else {
+                // update the ENR
+                self.remote_enr = Some(enr.clone());
+                updated_enr = self.remote_enr.clone();
+            }
+        } else if self.remote_enr.is_none() {
+            // didn't receive the remote's ENR
+            return Err(Discv5Error::InvalidEnr);
+        }
+
+        // enr must exist here
+        let remote_public_key = self
+            .remote_enr
+            .as_ref()
+            .expect("ENR Must exist")
+            .public_key();
+        // verify the auth header nonce
+        if !crypto::verify_authentication_nonce(
+            &remote_public_key,
             &Session::generate_nonce(id_nonce),
-            auth_header,
-            &tag,
-            &remote_enr.public_key(),
-        )?;
+            &auth_response.signature,
+        ) {
+            return Err(Discv5Error::InvalidSignature);
+        }
 
         // session has been established
         self.ephem_pubkey = Some(auth_header.ephemeral_pubkey.clone());
@@ -223,7 +257,9 @@ impl Session {
             auth_resp_key,
             decryption_key,
         };
-        self.timeout = Some(Instant::now() + Duration::from_secs(SESSION_TIMEOUT));
+        self.timeout = Some(Delay::new(
+            Instant::now() + Duration::from_secs(SESSION_TIMEOUT),
+        ));
 
         self.status = SessionStatus::Established;
 
@@ -239,16 +275,12 @@ impl Session {
         crypto::decrypt_message(&self.keys.decryption_key, nonce, message, aad)
     }
 
-    pub fn timeout(&self) -> &Option<Instant> {
-        &self.timeout
+    pub fn timeout(&mut self) -> &mut Option<Delay> {
+        &mut self.timeout
     }
 
     pub fn status(&self) -> SessionStatus {
         self.status
-    }
-
-    pub fn update_enr(&mut self, enr: Enr) {
-        self.remote_enr = Some(enr);
     }
 
     pub fn remote_enr(&self) -> &Option<Enr> {
