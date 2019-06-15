@@ -33,6 +33,40 @@ pub enum Response {
     RegisterTopic { registered: bool },
 }
 
+impl Response {
+    /// Determines if the response is a valid response to the given request.
+    pub fn match_request(&self, req: &Request) -> bool {
+        match self {
+            Response::Ping { .. } => {
+                if let Request::Ping { .. } = req {
+                    true
+                } else {
+                    false
+                }
+            }
+            Response::Nodes { .. } => match req {
+                Request::FindNode { .. } => true,
+                Request::TopicQuery { .. } => true,
+                _ => false,
+            },
+            Response::Ticket { .. } => {
+                if let Request::Ticket { .. } = req {
+                    true
+                } else {
+                    false
+                }
+            }
+            Response::RegisterTopic { .. } => {
+                if let Request::TopicQuery { .. } = req {
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
 impl std::fmt::Display for RpcType {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {

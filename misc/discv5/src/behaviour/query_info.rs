@@ -6,6 +6,8 @@ use enr::NodeId;
 use sha2::digest::generic_array::GenericArray;
 use smallvec::SmallVec;
 
+/// The number of distances to request when running a FINDNODE query. The probability that a peer returns
+/// any given target peer is `1 - 0.5**MAX_FINDNODE_REQUESTS`.
 const MAX_FINDNODE_REQUESTS: usize = 3;
 
 /// Information about a query.
@@ -64,7 +66,7 @@ impl Into<Key<QueryInfo>> for QueryInfo {
 ///
 /// As the iteration increases, FINDNODE requests adjacent distances from the exact peer distance.
 ///
-/// As an example, if the target has a distance of 12 from the remote peer, the sequence of distances that are sent for increasing iterations would be [12, 11, 13, 10, 14, .. ].
+/// As an example, if the target has a distance of 12 from the remote peer, the sequence of distances that are sent for increasing iterations would be [12, 13, 11, 14, 10, .. ].
 fn findnode_log2distance(target: &NodeId, return_peer: &ReturnPeer<NodeId>) -> Option<u64> {
     let iteration = return_peer.iteration as u64;
     if iteration > 127 {
@@ -79,11 +81,13 @@ fn findnode_log2distance(target: &NodeId, return_peer: &ReturnPeer<NodeId>) -> O
     let mut result_list = vec![distance];
     let mut difference = 1;
     while (result_list.len() as u64) < iteration {
-        if let Some(d) = distance.checked_sub(difference) {
-            result_list.push(d);
-        }
-        if (result_list.len() as u64) < iteration && distance + difference <= 256 {
+        if distance + difference <= 256 {
             result_list.push(distance + difference);
+        }
+        if (result_list.len() as u64) < iteration {
+            if let Some(d) = distance.checked_sub(difference) {
+                result_list.push(d);
+            }
         }
         difference += 1;
     }
@@ -98,10 +102,10 @@ mod tests {
     fn test_log2distance() {
         let target = NodeId::new(&[0u8; 32]);
         let mut destination = [0u8; 32];
-        destination[10] = 1; // gives a log2 distance of 168
+        destination[10] = 1; // gives a log2 distance of 169
         let destination = NodeId::new(&destination);
 
-        let expected_distances = vec![168, 167, 169, 166, 170, 165, 171, 164, 172];
+        let expected_distances = vec![169, 170, 168, 171, 167, 172, 166, 173, 165];
 
         for (iteration, distance) in expected_distances.into_iter().enumerate() {
             let return_peer = ReturnPeer {
@@ -119,12 +123,13 @@ mod tests {
     fn test_log2distance_lower() {
         let target = NodeId::new(&[0u8; 32]);
         let mut destination = [0u8; 32];
-        destination[31] = 16; // gives a log2 distance of 4
+        destination[31] = 8; // gives a log2 distance of 5
         let destination = NodeId::new(&destination);
 
-        let expected_distances = vec![4, 3, 5, 2, 6, 1, 7, 0, 8, 9, 10];
+        let expected_distances = vec![4, 5, 3, 6, 2, 7, 1, 8, 0, 9, 10];
 
         for (iteration, distance) in expected_distances.into_iter().enumerate() {
+            println!("{}", iteration);
             let return_peer = ReturnPeer {
                 node_id: destination.clone(),
                 iteration: iteration + 1,
@@ -140,10 +145,10 @@ mod tests {
     fn test_log2distance_upper() {
         let target = NodeId::new(&[0u8; 32]);
         let mut destination = [0u8; 32];
-        destination[0] = 16; // gives a log2 distance of 252
+        destination[0] = 8; // gives a log2 distance of 252
         let destination = NodeId::new(&destination);
 
-        let expected_distances = vec![252, 251, 253, 250, 254, 249, 255, 248, 256, 247, 246];
+        let expected_distances = vec![252, 253, 251, 254, 250, 255, 249, 256, 248, 247, 246];
 
         for (iteration, distance) in expected_distances.into_iter().enumerate() {
             let return_peer = ReturnPeer {

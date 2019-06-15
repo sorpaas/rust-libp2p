@@ -518,7 +518,7 @@ impl<TNodeId> QueryPeer<TNodeId> {
     pub fn new(key: Key<TNodeId>, state: QueryPeerState) -> Self {
         QueryPeer {
             key,
-            iteration: 0,
+            iteration: 1,
             peers_returned: 0,
             state,
         }
