@@ -163,6 +163,10 @@ impl<TSubstream> Discv5<TSubstream> {
         };
     }
 
+    pub fn connected_peers(&self) -> usize {
+        self.connected_peers.len()
+    }
+
     pub fn local_enr(&self) -> &Enr {
         &self.local_enr
     }
@@ -430,6 +434,7 @@ impl<TSubstream> Discv5<TSubstream> {
             let id: u64 = rand::random();
             let rpc_request = RpcRequest(id, node_id.clone());
 
+            debug!("Sending RPC Request: {:?}", req);
             match self.service.send_message(
                 &dst_enr,
                 rpc::ProtocolMessage {
@@ -601,6 +606,7 @@ impl<TSubstream> Discv5<TSubstream> {
     /// The equivalent of libp2p `inject_connected()` for a udp session. We have no stream, but a
     /// session key-pair has been negotiated.
     fn inject_session_established(&mut self, node_id: NodeId, enr: Enr) {
+        debug!("Session established with Node: {}", node_id);
         self.known_peer_ids.insert(enr.peer_id(), node_id.clone());
         self.connection_updated(node_id.clone(), Some(enr), NodeStatus::Connected);
         // send an initial ping and start the ping interval
@@ -620,6 +626,7 @@ impl<TSubstream> Discv5<TSubstream> {
         }
 
         // report the node as being disconnected.
+        warn!("Session dropped with Node: {}", node_id);
         self.connection_updated(node_id.clone(), None, NodeStatus::Disconnected);
         self.connected_peers.remove(&node_id);
     }

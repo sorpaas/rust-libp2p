@@ -50,7 +50,7 @@ pub struct SessionService {
 
     /// Pending raw requests. A list of raw messages we are awaiting a response from the remote
     /// for.
-    pending_requests: FnvHashMap<AuthTag, Request>,
+    pending_requests: FnvHashMap<NodeId, Vec<Request>>,
 
     /// Sent WHOAREYOU messages. Stored separately to lookup via `NodeId`.
     whoareyou_requests: FnvHashMap<NodeId, Request>,
@@ -244,14 +244,31 @@ impl SessionService {
         enr_seq: u64,
     ) -> Result<(), ()> {
         // the auth-tag must match a pending request
-        let req = self.pending_requests.remove(&token).ok_or_else(|| {
-            debug!("Received a WHOAREYOU packet that references an unknown or expired request")
+        let req = {
+            if let Some(known_reqs) = self.pending_requests.get_mut(&src_id) {
+                if let Some(pos) = known_reqs
+                    .iter()
+                    .position(|req| req.packet.auth_tag() == Some(&token))
+                {
+                    Some(known_reqs.remove(pos))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        let req = req.ok_or_else(|| {
+            debug!("Received a WHOAREYOU packet that references an unknown or expired request");
         })?;
 
         // the referenced request must come from the expected src or node-id
         if src != req.dst || src_id != req.node_id {
-            // add the request back
-            self.pending_requests.insert(token, req);
+            // add the request back - order is unimportant
+            self.pending_requests
+                .entry(src_id)
+                .or_insert_with(Vec::new)
+                .push(req);
             warn!("Incorrect WHOAREYOU packet source");
             return Err(());
         }
@@ -428,7 +445,6 @@ impl SessionService {
         aad: &[u8],
     ) -> Result<(), ()> {
         // check if we have an established session
-
         let session = match self.sessions.get(&src_id) {
             Some(s) if s.established() => s,
             Some(s) => {
@@ -478,6 +494,17 @@ impl SessionService {
                 return Err(());
             }
         };
+
+        // Remove any associated request from pending_request
+        if let Some(known_reqs) = self.pending_requests.get_mut(&src_id) {
+            if let Some(pos) = known_reqs
+                .iter()
+                .position(|req| req.rpc_id == Some(message.id))
+            {
+                trace!("Removing request id: {}", message.id);
+                known_reqs.remove(pos);
+            }
+        }
 
         // we have received a new message. Notify the behaviour.
         debug!("Message received: {}", message);
@@ -553,8 +580,10 @@ impl SessionService {
                 self.whoareyou_requests.insert(node_id.clone(), request);
             }
             _ => {
-                let auth_tag = *request.packet.auth_tag().expect("Must have an auth_tag");
-                self.pending_requests.insert(auth_tag, request);
+                self.pending_requests
+                    .entry(node_id.clone())
+                    .or_insert_with(Vec::new)
+                    .push(request);
             }
         }
     }
@@ -563,56 +592,62 @@ impl SessionService {
     fn check_timeouts(&mut self) {
         // remove expired requests/sessions
         // log pending request timeouts
-        let mut to_remove_reqs = Vec::new();
-        for (id, req) in self.pending_requests.iter_mut() {
-            match req.timeout.poll() {
-                Ok(Async::Ready(_)) => {
-                    if req.retries >= REQUEST_RETRIES {
-                        // the RPC has expired
-                        // determine which kind of RPC has timed out
-                        let node_id = req.node_id.clone();
-                        to_remove_reqs.push(id.clone());
-                        match req.packet {
-                            Packet::RandomPacket { .. } => {
-                                // no response from peer, flush all pending messages
-                                if let Some(pending_messages) =
-                                    self.pending_messages.remove(&req.node_id)
-                                {
-                                    for msg in pending_messages {
-                                        self.events.push_back(SessionEvent::RequestFailed(
-                                            node_id.clone(),
-                                            msg.id,
-                                        ));
+        for requests in self.pending_requests.values_mut() {
+            let mut expired_requests = Vec::new();
+            for (pos, req) in requests.iter_mut().enumerate() {
+                match req.timeout.poll() {
+                    Ok(Async::Ready(_)) => {
+                        if req.retries >= REQUEST_RETRIES {
+                            // the RPC has expired
+                            // determine which kind of RPC has timed out
+                            let node_id = req.node_id.clone();
+                            match req.packet {
+                                Packet::RandomPacket { .. } => {
+                                    // no response from peer, flush all pending messages
+                                    if let Some(pending_messages) =
+                                        self.pending_messages.remove(&req.node_id)
+                                    {
+                                        for msg in pending_messages {
+                                            self.events.push_back(SessionEvent::RequestFailed(
+                                                node_id.clone(),
+                                                msg.id,
+                                            ));
+                                        }
                                     }
                                 }
+                                Packet::AuthMessage { .. } | Packet::Message { .. } => {
+                                    self.events.push_back(SessionEvent::RequestFailed(
+                                        node_id,
+                                        req.rpc_id.expect("Auth messages have an rpc id"),
+                                    ));
+                                }
+                                Packet::WhoAreYou { .. } => {
+                                    unreachable!("WHOAREYOU requests are not in requests")
+                                }
                             }
-                            Packet::AuthMessage { .. } | Packet::Message { .. } => {
-                                self.events.push_back(SessionEvent::RequestFailed(
-                                    node_id,
-                                    req.rpc_id.expect("Auth messages have an rpc id"),
-                                ));
-                            }
-                            Packet::WhoAreYou { .. } => {
-                                unreachable!("WHOAREYOU requests are not in requests")
-                            }
+                            expired_requests.push(pos);
+                        } else {
+                            // increment the request retry count and restart the timeout
+                            debug!(
+                                "Resending message: {:?} to node: {}",
+                                req.packet, req.node_id
+                            );
+                            self.service.send(req.dst, req.packet.clone());
+                            req.retries += 1;
+                            req.timeout =
+                                Delay::new(Instant::now() + Duration::from_secs(REQUEST_TIMEOUT));
                         }
-                    } else {
-                        // increment the request retry count and restart the timeout
-                        debug!("Resending message to {}", req.node_id);
-                        self.service.send(req.dst, req.packet.clone());
-                        req.retries += 1;
-                        req.timeout =
-                            Delay::new(Instant::now() + Duration::from_secs(REQUEST_TIMEOUT));
                     }
+                    Ok(Async::NotReady) => (),
+                    Err(_) => (),
                 }
-                Ok(Async::NotReady) => (),
-                Err(_) => (),
+            }
+            // remove any requests that have expired
+            for expired in expired_requests {
+                requests.remove(expired);
             }
         }
 
-        for id in to_remove_reqs.into_iter() {
-            self.pending_requests.remove(&id);
-        }
         let mut to_remove_reqs = Vec::new();
         for (node_id, req) in self.whoareyou_requests.iter_mut() {
             match req.timeout.poll() {

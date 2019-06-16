@@ -9,18 +9,26 @@
 //! participating node in the command line. The nodes should discover each other over a period
 //! of time. (It is probabilistic that nodes to find each other on any given query).
 //!
-//! A single instance listening on udp-port 9000 can be created via:
+//! A single instance listening on a udp socket `127.0.0.1:9000` can be created via:
 //!
 //! ```sh
-//! cargo run --example discv5 -- 9000
+//! cargo run --example discv5
 //! ```
 //!
 //! This will display the created ENR record for the node.
 //!
-//! A second instance, in a new terminal, can be run on port 9001 and connected to the first via:
+//! An IP address, port and ENR node can also be passed as command line options.
+//!
+//! More specifically,
 //!
 //! ```sh
-//! cargo run --example discv5 -- 9001 <Base64-ENR>
+//! cargo run --example discv5 -- 127.0.0.1 9001 <Base64-ENR>
+//! ```
+//!
+//! Therefore, a second instance, in a new terminal, can be run on port 9001 and connected to the first via:
+//!
+//! ```sh
+//! cargo run --example discv5 -- 127.0.0.1 9001 <Base64-ENR>
 //! ```
 //!
 //! where `<Base64-ENR>` is the base64 ENR given from executing the first node. These steps can be
@@ -36,8 +44,17 @@ use std::time::Duration;
 fn main() {
     env_logger::init();
 
+    // if there is an address specified use it
+    let address = {
+        if let Some(address) = std::env::args().nth(1) {
+            address.parse::<Ipv4Addr>().unwrap()
+        } else {
+            "127.0.0.1".parse::<Ipv4Addr>().unwrap()
+        }
+    };
+
     let port = {
-        if let Some(udp_port) = std::env::args().nth(1) {
+        if let Some(udp_port) = std::env::args().nth(2) {
             u16::from_str_radix(&udp_port, 10).unwrap()
         } else {
             9000
@@ -48,12 +65,11 @@ fn main() {
     let keypair = identity::Keypair::generate_secp256k1();
     // construct a local ENR
     let enr = libp2p::enr::EnrBuilder::new()
-        .ip("0.0.0.0".parse::<Ipv4Addr>().unwrap().into())
+        .ip(address.into())
         .udp(port)
         .build(&keypair)
         .unwrap();
 
-    println!("Local ENR: {}", enr);
     println!("Base64 ENR: {}", enr.to_base64());
 
     // unused transport for building a swarm
@@ -64,9 +80,11 @@ fn main() {
     let mut swarm = libp2p::Swarm::new(transport, discv5, keypair.public().into_peer_id());
 
     // if we know of another peer's ENR, add it known peers
-    if let Some(base64_enr) = std::env::args().nth(2) {
+    if let Some(base64_enr) = std::env::args().nth(3) {
         if let Ok(enr) = libp2p::enr::Enr::try_from(base64_enr) {
             swarm.add_enr(enr);
+        } else {
+            panic!("Decoding ENR failed");
         }
     }
 
@@ -80,6 +98,7 @@ fn main() {
             while let Ok(Async::Ready(_)) = query_interval.poll() {
                 // pick a random node target
                 let target_random_node_id = libp2p::enr::NodeId::random();
+                println!("Connected Peers: {}", swarm.connected_peers());
                 println!("Searching for peers...");
                 // execute a FINDNODE query
                 swarm.find_node(target_random_node_id);
