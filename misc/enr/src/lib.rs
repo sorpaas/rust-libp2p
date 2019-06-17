@@ -45,10 +45,10 @@ mod node_id;
 
 use crate::enr_keypair::{EnrKeypair, EnrPublicKey};
 use base64;
+use indexmap::IndexMap;
 use libp2p_core::identity::{ed25519, Keypair, PublicKey};
 use log::debug;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
-use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::net::{IpAddr, SocketAddr};
 
@@ -65,7 +65,7 @@ const MAX_ENR_SIZE: usize = 300;
 /// The ENR Record.
 ///
 /// This struct will always have a valid signature, known public key type, sequence number and `NodeId`. All other parameters are variable/optional.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Enr {
     /// ENR sequence number.
     pub seq: u64,
@@ -73,12 +73,9 @@ pub struct Enr {
     /// The `NodeId` of the ENR record.
     node_id: NodeId,
 
-    /// Key-value contents of the ENR.
-    content: HashMap<String, Vec<u8>>,
-
-    /// RLP-encoded content. This exists because Hashmaps do not preserve ordering and the signature
-    /// is order-dependant. This is updated every time the ENR is updated.
-    rlp_content: Vec<u8>,
+    /// Key-value contents of the ENR. An IndexMap is used to preserve the order of keys, which is
+    /// important for verifying the signature of the ENR.
+    content: IndexMap<String, Vec<u8>>,
 
     /// The signature of the ENR record, stored as bytes.
     signature: Vec<u8>,
@@ -210,7 +207,7 @@ impl Enr {
     /// Verify the signature of the ENR record.
     pub fn verify(&self) -> bool {
         let enr_pubkey = EnrPublicKey::from(self.public_key());
-        return enr_pubkey.verify(&self.rlp_content, &self.signature);
+        return enr_pubkey.verify(&self.rlp_content(), &self.signature);
     }
 
     /// RLP encodes the ENR into a byte array.
@@ -228,7 +225,7 @@ impl Enr {
 
     /// Returns the current size of the ENR.
     pub fn size(&self) -> usize {
-        self.rlp_content.len()
+        self.rlp_content().len()
     }
 
     // Setters //
@@ -252,7 +249,7 @@ impl Enr {
         self.seq += 1;
 
         // construct compact signature
-        let signature = enr_keypair
+        self.signature = enr_keypair
             .sign(&self.rlp_content())
             .map_err(|_| EnrError::SigningError)?;
 
@@ -260,7 +257,7 @@ impl Enr {
         self.node_id = NodeId::from(keypair.public());
 
         // check the size of the record
-        if self.rlp_content.len() + signature.len() + 8 > MAX_ENR_SIZE {
+        if self.size() > MAX_ENR_SIZE {
             return Err(EnrError::ExceedsMaxSize);
         }
 
@@ -306,7 +303,7 @@ impl Enr {
         self.seq += 1;
 
         // construct compact signature
-        let signature = enr_keypair
+        self.signature = enr_keypair
             .sign(&self.rlp_content())
             .map_err(|_| EnrError::SigningError)?;
 
@@ -314,7 +311,7 @@ impl Enr {
         self.node_id = NodeId::from(keypair.public());
 
         // check the size of the record
-        if self.rlp_content.len() + signature.len() + 8 > MAX_ENR_SIZE {
+        if self.size() > MAX_ENR_SIZE {
             return Err(EnrError::ExceedsMaxSize);
         }
 
@@ -354,14 +351,20 @@ impl std::fmt::Display for Enr {
     }
 }
 
+impl std::fmt::Debug for Enr {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "ENR: {}", self.to_base64())
+    }
+}
+
 /// Convert a URL-SAFE base64 encoded ENR into an ENR.
 impl TryFrom<String> for Enr {
-    type Error = &'static str;
+    type Error = String;
 
     fn try_from(base64_string: String) -> Result<Self, Self::Error> {
         let bytes = base64::decode_config(&base64_string, base64::URL_SAFE)
             .map_err(|_| "Invalid base64 encoding")?;
-        rlp::decode::<Enr>(&bytes).map_err(|_| "Invalid ENR")
+        rlp::decode::<Enr>(&bytes).map_err(|e| format!("Invalid ENR: {:?}", e))
     }
 }
 
@@ -371,7 +374,7 @@ pub struct EnrBuilder {
     seq: u64,
 
     /// The key-value pairs for the ENR record.
-    content: HashMap<String, Vec<u8>>,
+    content: IndexMap<String, Vec<u8>>,
 }
 
 impl EnrBuilder {
@@ -379,7 +382,7 @@ impl EnrBuilder {
     pub fn new() -> Self {
         EnrBuilder {
             seq: 1,
-            content: HashMap::new(),
+            content: IndexMap::new(),
         }
     }
 
@@ -466,7 +469,6 @@ impl EnrBuilder {
             seq: self.seq,
             node_id: NodeId::from(key.public()),
             content: self.content.clone(),
-            rlp_content,
             signature,
         })
     }
@@ -477,6 +479,7 @@ impl Encodable for Enr {
         s.begin_list(self.content.len() * 2 + 2);
         s.append(&self.signature);
         s.append(&self.seq);
+        // must use rlp_content to preserve ordering.
         for (k, v) in self.content.iter() {
             s.append(k);
             s.append(v);
@@ -514,26 +517,14 @@ impl Decodable for Enr {
         seq[8 - seq_bytes.len()..].copy_from_slice(&seq_bytes);
         let seq = u64::from_be_bytes(seq);
 
-        // keep track of the current rlp ordering
-        let mut rlp_encodings: Vec<Vec<u8>> = Vec::new();
-
-        let mut content = HashMap::new();
+        let mut content = IndexMap::new();
         for _ in 0..decoded_list.len() / 2 {
-            let value = decoded_list.pop().expect("Large enough");
-            let key = decoded_list.pop().expect("Large enough");
-
-            // keep current ordering in reverse
-            rlp_encodings.push(value.clone());
-            rlp_encodings.push(key.clone());
+            let key = decoded_list.remove(0);
+            let value = decoded_list.remove(0);
 
             let key = String::from_utf8_lossy(&key);
             content.insert(key.to_string(), value);
         }
-
-        rlp_encodings.push(seq_bytes);
-        let rev_rlp_encodings: Vec<Vec<u8>> = rlp_encodings.iter().cloned().rev().collect();
-
-        let rlp_content = rlp::encode_list::<Vec<u8>, Vec<u8>>(&rev_rlp_encodings);
 
         // verify we know the signature type
         let public_key = {
@@ -562,7 +553,6 @@ impl Decodable for Enr {
             node_id,
             signature,
             content,
-            rlp_content,
         };
 
         // verify the signature before returning
@@ -607,6 +597,7 @@ mod tests {
         assert_eq!(enr.tcp(), None);
         assert_eq!(enr.signature(), &signature[..]);
         assert_eq!(pubkey.unwrap().to_vec(), expected_pubkey);
+        assert!(enr.verify());
     }
 
     #[test]
@@ -637,6 +628,7 @@ mod tests {
             decoded_enr.public_key().into_protobuf_encoding(),
             key.public().into_protobuf_encoding()
         );
+        assert!(decoded_enr.verify());
     }
 
     #[test]
@@ -662,6 +654,7 @@ mod tests {
         assert_eq!(decoded_enr.ip(), Some(ip.into()));
         assert_eq!(decoded_enr.tcp(), Some(tcp));
         assert_eq!(decoded_enr.public_key(), key.public());
+        assert!(decoded_enr.verify());
     }
 
     #[test]
@@ -680,6 +673,7 @@ mod tests {
         };
 
         assert!(enr.add_key("random", Vec::new(), &key).unwrap());
+        assert!(enr.verify());
     }
 
     #[test]
@@ -700,6 +694,7 @@ mod tests {
         assert_eq!(enr.id(), Some(id.into()));
         assert_eq!(enr.ip(), Some(ip.into()));
         assert_eq!(enr.tcp(), Some(tcp));
+        assert!(enr.verify());
 
         // Compare the encoding as the key itself can be differnet
         assert_eq!(

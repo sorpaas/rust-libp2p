@@ -29,14 +29,13 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::timer::Delay;
 
-// TODO: Drop the session on RPC timeout.
-
 mod tests;
 
 /// Seconds before a timeout expires.
 const REQUEST_TIMEOUT: u64 = 10;
 /// The number of times to retry a request.
 const REQUEST_RETRIES: u8 = 2;
+pub const SESSION_TIMEOUT: u64 = 30;
 
 pub struct SessionService {
     /// Queue of events produced by the session service.
@@ -60,6 +59,7 @@ pub struct SessionService {
 
     /// Sessions that have been created for each node id. These can be established or
     /// awaiting response from remote nodes.
+    //TODO: Limit number of sessions
     sessions: FnvHashMap<NodeId, Session>,
 
     /// The discovery v5 UDP service.
@@ -77,7 +77,7 @@ impl SessionService {
         let udp = enr.udp().unwrap_or_else(|| 9000);
         let ip = enr
             .ip()
-            .unwrap_or_else(|| "127.0.0.1".parse().expect("valid ip"));
+            .unwrap_or_else(|| "127.0.0.1".parse().expect("valid IP"));
 
         let socket_addr = SocketAddr::new(ip, udp);
         // generates the WHOAREYOU magic packet for the local node-id
@@ -120,7 +120,7 @@ impl SessionService {
             } else {
                 dst_enr.udp_socket().ok_or_else(|| {
                     warn!(
-                        "Could not send message. ENR has no ip and udp port: {}",
+                        "Could not send message. ENR doesn't contain an IP and UDP port: {}",
                         dst_enr
                     );
                     Discv5Error::InvalidEnr
@@ -154,30 +154,27 @@ impl SessionService {
 
                 // need to establish a new session, send a random packet
                 let (session, packet) = Session::new_random(self.tag(&dst_id), dst_enr.clone());
-                self.send_request_packet(dst, dst_id, packet, None);
+
+                let request = Request::new(dst, packet, None);
+
+                self.send_request(dst_id.clone(), request);
                 self.sessions.insert(dst_id.clone(), session);
                 return Ok(());
             }
         };
 
-        // avoid cloning a message
-        let id = message.id;
-        let mut is_request = false;
-        if let RpcType::Request(_) = &message.body {
-            is_request = true;
-        }
-
         // session is established, encrypt the message and send
         let packet = session
-            .encrypt_message(self.tag(&dst_id), &message.encode())
+            .encrypt_message(self.tag(&dst_id), &message.clone().encode())
             .map_err(|e| {
                 error!("Failed to encrypt message");
                 e
             })?;
 
         // only log the packet request if it's an RPC request
-        if is_request {
-            self.send_request_packet(dst, &dst_id, packet, Some(id));
+        if let RpcType::Request(_) = &message.body {
+            let request = Request::new(dst, packet, Some(message));
+            self.send_request(dst_id.clone(), request);
         } else {
             // send the response
             self.service.send(dst, packet);
@@ -188,7 +185,6 @@ impl SessionService {
 
     /// This is called in response to a SessionMessage::WhoAreYou event. The protocol finds the
     /// highest known ENR then calls this function to send a WHOAREYOU packet.
-    //TODO: Comment why remote_enr
     //TODO: Create a more elegant API
     pub fn send_whoareyou(
         &mut self,
@@ -201,7 +197,7 @@ impl SessionService {
         // If a WHOAREYOU is already sent or a session is already established, ignore this request.
         match self.sessions.get(node_id) {
             Some(s) if s.established() || s.status() == SessionStatus::WhoAreYouSent => {
-                warn!("Session exits. WhoAreYou packet not sent");
+                warn!("Session exists. WhoAreYou packet not sent");
                 return;
             }
             _ => {}
@@ -211,7 +207,8 @@ impl SessionService {
         let (session, packet) =
             Session::new_whoareyou(self.tag(node_id), node_id, enr_seq, remote_enr, auth_tag);
         self.sessions.insert(node_id.clone(), session);
-        self.send_request_packet(dst, node_id, packet, None);
+        let request = Request::new(dst, packet, None);
+        self.send_request(node_id.clone(), request);
     }
 
     /// Calculates the src `NodeId` given a tag.
@@ -262,8 +259,8 @@ impl SessionService {
             debug!("Received a WHOAREYOU packet that references an unknown or expired request");
         })?;
 
-        // the referenced request must come from the expected src or node-id
-        if src != req.dst || src_id != req.node_id {
+        // the referenced request must come from the expected src
+        if src != req.dst {
             // add the request back - order is unimportant
             self.pending_requests
                 .entry(src_id)
@@ -279,19 +276,32 @@ impl SessionService {
 
         // find the session associated with this WHOAREYOU
         let session = self.sessions.get_mut(&src_id).ok_or_else(|| {
-            error!("Received a WHOAREYOU packet without having an established session")
+            warn!("Received a WHOAREYOU packet without having an established session.")
         })?;
 
-        // get the messages that are waiting for an established session
-        let messages = self
-            .pending_messages
-            .get_mut(&src_id)
-            .ok_or_else(|| error!("No pending messages found for WHOAREYOU request."))?;
+        // Determine which message to send back. A WHOAREYOU could refer to the random packet
+        // sent during an establishing a connection, or their session has expired on one of our
+        // sent messages and we need to re-encrypt it.
+        let message = {
+            if let Packet::RandomPacket { .. } = req.packet {
+                // get the messages that are waiting for an established session
+                let messages = self
+                    .pending_messages
+                    .get_mut(&src_id)
+                    .ok_or_else(|| error!("No pending messages found for WHOAREYOU request."))?;
 
-        if messages.is_empty() {
-            debug!("No pending messages found for WHOAREYOU request.");
-            return Err(());
-        }
+                if messages.is_empty() {
+                    debug!("No pending messages found for WHOAREYOU request.");
+                    return Err(());
+                }
+                // select the first message in the queue
+                messages.remove(0)
+            } else {
+                // re-send the original message
+                req.message
+                    .expect("All non-random requests must have an unencrypted message")
+            }
+        };
 
         // sign the nonce
         let nonce = Session::generate_nonce(id_nonce);
@@ -312,24 +322,25 @@ impl SessionService {
         // generate the auth response to be encrypted
         let auth_pt = AuthResponse::new(&sig, updated_enr).encode();
 
-        // encrypt the earliest message
-        let earliest_message = messages.remove(0);
-        let rpc_id = earliest_message.id;
-
         // generate session keys and encrypt the earliest packet with the authentication header
-        let auth_packet = session
-            .encrypt_with_header(
-                tag,
-                &self.enr.node_id(),
-                &id_nonce,
-                &auth_pt,
-                &earliest_message.clone().encode(),
-            )
-            .map_err(|e| {
-                // insert the message back into the queue
-                messages.insert(0, earliest_message);
-                error!("Could not generate a session. Error: {:?}", e)
-            })?;
+        let auth_packet = match session.encrypt_with_header(
+            tag,
+            &self.enr.node_id(),
+            &id_nonce,
+            &auth_pt,
+            &message.clone().encode(),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                // insert the message back into the pending queue
+                self.pending_messages
+                    .entry(src_id)
+                    .or_insert_with(Vec::new)
+                    .insert(0, message);
+                error!("Could not generate a session. Error: {:?}", e);
+                return Err(());
+            }
+        };
 
         debug!("Session established with node: {}", src_id);
         // session has been established, notify the protocol
@@ -342,8 +353,9 @@ impl SessionService {
                 .expect("ENR exists when awaiting a WHOAREYOU"),
         ));
         // send the response
+        let request = Request::new(src, auth_packet, Some(message));
         debug!("Sending Authentication response to node: {}", src_id);
-        self.send_request_packet(src, &src_id, auth_packet, Some(rpc_id));
+        self.send_request(src_id.clone(), request);
 
         // flush the message cache
         let _ = self.flush_messages(src, &src_id);
@@ -380,9 +392,9 @@ impl SessionService {
             .ok_or_else(|| error!("There was no WHOAREYOU request associated with a session"))?;
 
         // verify the source ip, avoid spam and signature verification calculations from malicious packets.
-        // the referenced request must come from the expected src or node-id
-        if src != req.dst || src_id != req.node_id {
-            warn!("Received an authenticated header from incorrect source. Expected id: {:?}, actual id: {:?}, expected source: {:?} actual source: {:?}", req.node_id, src_id, req.dst, src);
+        // the referenced request must come from the expected src
+        if src != req.dst {
+            warn!("Received an authenticated header from incorrect source. NodeId: {}, expected source: {:?} actual source: {:?}", src_id, req.dst, src);
             // add the request back
             self.whoareyou_requests.insert(src_id, req);
             return Err(());
@@ -499,7 +511,7 @@ impl SessionService {
         if let Some(known_reqs) = self.pending_requests.get_mut(&src_id) {
             if let Some(pos) = known_reqs
                 .iter()
-                .position(|req| req.rpc_id == Some(message.id))
+                .position(|req| req.id() == Some(message.id))
             {
                 trace!("Removing request id: {}", message.id);
                 known_reqs.remove(pos);
@@ -520,7 +532,7 @@ impl SessionService {
     /// Encrypts and sends any messages that were waiting for a session to be established.
     #[inline]
     fn flush_messages(&mut self, dst: SocketAddr, dst_id: &NodeId) -> Result<(), ()> {
-        let mut packets_to_send = Vec::new();
+        let mut requests_to_send = Vec::new();
 
         {
             // get the session for this id
@@ -534,54 +546,39 @@ impl SessionService {
 
             let tag = self.tag(dst_id);
 
-            let mut messages = self
+            let messages = self
                 .pending_messages
                 .remove(dst_id)
                 .ok_or_else(|| trace!("No messages to send"))?;
 
-            for _ in 0..messages.len() {
-                let msg = messages.remove(0);
-                let rpc_id = msg.id;
+            for msg in messages.into_iter() {
                 let packet = session
-                    .encrypt_message(tag, &msg.encode())
+                    .encrypt_message(tag, &msg.clone().encode())
                     .map_err(|e| warn!("Failed to encrypt message, Error: {:?}", e))?;
-                packets_to_send.push((packet, rpc_id));
+                let request = Request::new(dst, packet, Some(msg));
+                requests_to_send.push(request);
             }
         }
 
-        for (packet, rpc_id) in packets_to_send.into_iter() {
+        for request in requests_to_send.into_iter() {
             debug!("Sending cached message");
-            self.send_request_packet(dst, dst_id, packet, Some(rpc_id));
+            self.send_request(dst_id.clone(), request);
         }
         Ok(())
     }
 
     /// Wrapper around `service.send()` that adds all sent messages to the `pending_requests`.
     #[inline]
-    fn send_request_packet(
-        &mut self,
-        dst: SocketAddr,
-        node_id: &NodeId,
-        packet: Packet,
-        rpc_id: Option<u64>,
-    ) {
-        self.service.send(dst, packet.clone());
-        let request = Request {
-            rpc_id,
-            dst,
-            node_id: node_id.clone(),
-            packet,
-            timeout: Delay::new(Instant::now() + Duration::from_secs(REQUEST_TIMEOUT)),
-            retries: 1,
-        };
+    fn send_request(&mut self, node_id: NodeId, request: Request) {
+        self.service.send(request.dst, request.packet.clone());
 
         match &request.packet {
             Packet::WhoAreYou { .. } => {
-                self.whoareyou_requests.insert(node_id.clone(), request);
+                self.whoareyou_requests.insert(node_id, request);
             }
             _ => {
                 self.pending_requests
-                    .entry(node_id.clone())
+                    .entry(node_id)
                     .or_insert_with(Vec::new)
                     .push(request);
             }
@@ -592,7 +589,7 @@ impl SessionService {
     fn check_timeouts(&mut self) {
         // remove expired requests/sessions
         // log pending request timeouts
-        for requests in self.pending_requests.values_mut() {
+        for (node_id, requests) in self.pending_requests.iter_mut() {
             let mut expired_requests = Vec::new();
             for (pos, req) in requests.iter_mut().enumerate() {
                 match req.timeout.poll() {
@@ -600,12 +597,11 @@ impl SessionService {
                         if req.retries >= REQUEST_RETRIES {
                             // the RPC has expired
                             // determine which kind of RPC has timed out
-                            let node_id = req.node_id.clone();
                             match req.packet {
                                 Packet::RandomPacket { .. } => {
                                     // no response from peer, flush all pending messages
                                     if let Some(pending_messages) =
-                                        self.pending_messages.remove(&req.node_id)
+                                        self.pending_messages.remove(&node_id)
                                     {
                                         for msg in pending_messages {
                                             self.events.push_back(SessionEvent::RequestFailed(
@@ -614,11 +610,17 @@ impl SessionService {
                                             ));
                                         }
                                     }
+                                    // drop the session
+                                    debug!(
+                                        "Session couldn't be established with Node: {}",
+                                        node_id
+                                    );
+                                    self.sessions.remove(&node_id);
                                 }
                                 Packet::AuthMessage { .. } | Packet::Message { .. } => {
                                     self.events.push_back(SessionEvent::RequestFailed(
-                                        node_id,
-                                        req.rpc_id.expect("Auth messages have an rpc id"),
+                                        node_id.clone(),
+                                        req.id().expect("Auth messages have an rpc id"),
                                     ));
                                 }
                                 Packet::WhoAreYou { .. } => {
@@ -628,10 +630,7 @@ impl SessionService {
                             expired_requests.push(pos);
                         } else {
                             // increment the request retry count and restart the timeout
-                            debug!(
-                                "Resending message: {:?} to node: {}",
-                                req.packet, req.node_id
-                            );
+                            debug!("Resending message: {:?} to node: {}", req.packet, node_id);
                             self.service.send(req.dst, req.packet.clone());
                             req.retries += 1;
                             req.timeout =
@@ -665,7 +664,7 @@ impl SessionService {
                     } else {
                         debug!(
                             "Resending WHOAREYOU message. Iteration: {},  NodeId: {}",
-                            req.retries, req.node_id
+                            req.retries, node_id
                         );
                         self.service.send(req.dst, req.packet.clone());
                         req.retries += 1;
@@ -683,13 +682,21 @@ impl SessionService {
         }
 
         // remove timed-out sessions - do not need to alert the protocol
+        // Only drop a session if we are not expecting any responses.
         let mut to_remove_sessions = Vec::new();
         for (node_id, session) in self.sessions.iter_mut() {
             if let Some(timeout) = session.timeout() {
                 match timeout.poll() {
                     Ok(Async::Ready(_)) => {
-                        debug!("Session timed out for node: {}", node_id);
-                        to_remove_sessions.push(node_id.clone());
+                        // only remove a session if there are no pending requests.
+                        let reqs = self.pending_requests.get(&node_id);
+                        let whos = self.whoareyou_requests.get(&node_id);
+                        if reqs.map_or(true, |v| v.is_empty()) && whos.is_none() {
+                            session.increment_timeout(REQUEST_TIMEOUT);
+                        } else {
+                            debug!("Session timed out for node: {}", node_id);
+                            to_remove_sessions.push(node_id.clone());
+                        }
                     }
                     Ok(Async::NotReady) => (),
                     Err(_) => (),
@@ -756,6 +763,7 @@ impl SessionService {
 pub enum SessionEvent {
     /// A session has been established with a node.
     Established(NodeId, Enr),
+
     /// A message was received.
     Message {
         src_id: NodeId,
@@ -779,21 +787,34 @@ pub enum SessionEvent {
 #[derive(Debug)]
 /// A request to a node that we are waiting for a response.
 pub struct Request {
-    /// The Id associated with the RPC.
-    pub rpc_id: Option<u64>,
-
     /// The destination socket address.
     pub dst: SocketAddr,
 
-    /// The `NodeId` the request was sent to.
-    pub node_id: NodeId,
-
     /// The raw discv5 packet sent.
     pub packet: Packet,
+
+    /// The un-encrypted message. Required if need to re-encrypt and re-send.
+    pub message: Option<ProtocolMessage>,
 
     /// The time when this request times out.
     pub timeout: Delay,
 
     /// The number of times to re-send this request until it is considered failed.
     pub retries: u8,
+}
+
+impl Request {
+    pub fn new(dst: SocketAddr, packet: Packet, message: Option<ProtocolMessage>) -> Self {
+        Request {
+            dst,
+            packet,
+            message,
+            timeout: Delay::new(Instant::now() + Duration::from_secs(REQUEST_TIMEOUT)),
+            retries: 1,
+        }
+    }
+
+    pub fn id(&self) -> Option<u64> {
+        self.message.as_ref().map(|m| m.id)
+    }
 }

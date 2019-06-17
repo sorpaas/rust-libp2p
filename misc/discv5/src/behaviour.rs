@@ -312,6 +312,8 @@ impl<TSubstream> Discv5<TSubstream> {
                 }
                 _ => {} //TODO: Implement all RPC methods
             }
+        } else {
+            warn!("Received an RPC response which doesn't match a request");
         }
     }
 
@@ -340,7 +342,6 @@ impl<TSubstream> Discv5<TSubstream> {
         enr: &Enr,
         distance: u64,
     ) {
-        trace!("Sending FINDNODES response");
         let nodes: Vec<EntryRefView<NodeId, Enr>> = self
             .kbuckets
             .nodes_by_distance(distance)
@@ -356,6 +357,7 @@ impl<TSubstream> Discv5<TSubstream> {
                     nodes: Vec::new(),
                 }),
             };
+            trace!("Sending empty FINDNODES response to: {}", enr.node_id());
             let _ = self
                 .service
                 .send_message(enr, response, Some(dst))
@@ -369,6 +371,9 @@ impl<TSubstream> Discv5<TSubstream> {
             for entry in nodes.into_iter() {
                 if entry.node.value.size() + total_size < MAX_PACKET_SIZE - 80 {
                     total_size += entry.node.value.size();
+                    trace!("Adding ENR, Valid? : {}", entry.node.value.verify());
+                    trace!("Enr: {}", entry.node.value.clone());
+                    trace!("Enr: {:?}", entry.node.value.clone());
                     to_send_nodes[rpc_index].push(entry.node.value.clone());
                 } else {
                     total_size = entry.node.value.size();
@@ -389,6 +394,11 @@ impl<TSubstream> Discv5<TSubstream> {
                 .collect();
 
             for response in responses {
+                trace!(
+                    "Sending FINDNODES response to: {}. Response: {:?}",
+                    enr.node_id(),
+                    response.clone().encode()
+                );
                 let _ = self
                     .service
                     .send_message(enr, response, Some(dst))
@@ -625,8 +635,8 @@ impl<TSubstream> Discv5<TSubstream> {
             }
         }
 
-        // report the node as being disconnected.
-        warn!("Session dropped with Node: {}", node_id);
+        // report the nodie as being disconnected.
+        debug!("Session dropped with Node: {}", node_id);
         self.connection_updated(node_id.clone(), None, NodeStatus::Disconnected);
         self.connected_peers.remove(&node_id);
     }

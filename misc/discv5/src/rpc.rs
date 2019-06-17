@@ -320,10 +320,9 @@ impl ProtocolMessage {
                     })?;
                     let mut nodes = vec![];
                     for enr in enr_list.into_iter() {
-                        nodes.push(
-                            rlp::decode::<Enr>(&enr)
-                                .map_err(|_| DecodingError::InvalidRLP("Invalid ENR Encoding"))?,
-                        );
+                        nodes.push(rlp::decode::<Enr>(&enr).map_err(|e| {
+                            DecodingError::InvalidEnr(format!("Invalid ENR: {:?}", e))
+                        })?);
                     }
                     nodes
                 };
@@ -417,6 +416,7 @@ pub enum DecodingError {
     InvalidU64Size,
     TooSmall,
     InvalidRLP(&'static str),
+    InvalidEnr(String),
     UnknownMessageType,
     InvalidValue,
 }
@@ -531,6 +531,23 @@ mod tests {
         let decoded = ProtocolMessage::decode(encoded).unwrap();
 
         assert_eq!(request, decoded);
+    }
+
+    #[test]
+    fn age_yay() {
+        let encoded = [
+            4, 248, 152, 136, 240, 112, 174, 134, 99, 129, 236, 212, 136, 0, 0, 0, 0, 0, 0, 0, 1,
+            184, 132, 248, 130, 184, 128, 248, 126, 184, 64, 220, 26, 93, 230, 24, 12, 174, 126,
+            166, 69, 108, 87, 193, 129, 15, 189, 178, 109, 255, 34, 245, 129, 158, 80, 111, 166,
+            47, 21, 123, 163, 131, 216, 5, 207, 230, 69, 175, 34, 188, 180, 195, 151, 215, 129,
+            128, 217, 236, 165, 98, 140, 184, 73, 206, 66, 22, 198, 215, 130, 242, 248, 20, 118,
+            90, 71, 1, 130, 105, 112, 132, 127, 0, 0, 1, 137, 115, 101, 99, 112, 50, 53, 54, 107,
+            49, 161, 3, 193, 148, 96, 173, 91, 30, 11, 75, 180, 19, 251, 182, 31, 97, 58, 247, 140,
+            248, 18, 10, 65, 191, 69, 94, 121, 33, 78, 159, 231, 101, 192, 37, 131, 117, 100, 112,
+            130, 35, 42,
+        ];
+        let decoded = ProtocolMessage::decode(encoded.to_vec()).unwrap();
+        println!("{:?}", decoded);
     }
 
     #[test]

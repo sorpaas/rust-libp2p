@@ -210,8 +210,10 @@ where
         &'a mut self,
         log2_distance: u64,
     ) -> Vec<EntryRefView<'a, TPeerId, TVal>> {
-        if log2_distance > 0 && log2_distance < (NUM_BUCKETS as u64) {
-            let bucket = &mut self.buckets[log2_distance as usize];
+        // the log2 distance ranges from 1-256 and is always 1 more than the bucket index. For this
+        // reason we subtract 1 from log2 distance to get the correct bucket index.
+        if log2_distance > 0 && log2_distance <= (NUM_BUCKETS as u64) {
+            let bucket = &mut self.buckets[(log2_distance - 1) as usize];
             if let Some(applied) = bucket.apply_pending() {
                 self.applied_pending.push_back(applied)
             }

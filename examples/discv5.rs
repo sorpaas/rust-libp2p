@@ -70,6 +70,7 @@ fn main() {
         .build(&keypair)
         .unwrap();
 
+    println!("Node Id: {}", enr.node_id());
     println!("Base64 ENR: {}", enr.to_base64());
 
     // unused transport for building a swarm
@@ -116,7 +117,7 @@ fn main() {
                             println!("Query Completed. No peers found.")
                         }
                     }
-                    _ => println!("Event: {:?}", event),
+                    _ => (),
                 },
                 Async::Ready(Some(_)) => (),
                 Async::Ready(None) | Async::NotReady => break,

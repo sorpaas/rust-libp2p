@@ -5,7 +5,7 @@
 
 use super::packet::{Packet, MAGIC_LENGTH};
 use futures::{prelude::*, task};
-use log::{debug, trace};
+use log::debug;
 use std::io;
 use std::net::SocketAddr;
 use tokio_udp::UdpSocket;
@@ -49,7 +49,6 @@ impl Discv5Service {
         // send messages
         while !self.send_queue.is_empty() {
             let (dst, packet) = self.send_queue.remove(0);
-            trace!("Sending packet to socket. Packet: {:?}", packet);
 
             match self.socket.poll_send_to(&packet.encode(), &dst) {
                 Ok(Async::Ready(bytes_written)) => {

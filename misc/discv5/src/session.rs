@@ -13,6 +13,7 @@
 
 use super::packet::{AuthHeader, AuthTag, Nonce, Packet, Tag, MAGIC_LENGTH};
 use crate::crypto;
+use crate::session_service::SESSION_TIMEOUT;
 use crate::Discv5Error;
 use enr::{Enr, NodeId};
 use libp2p_core::identity::Keypair;
@@ -23,9 +24,6 @@ use zeroize::Zeroize;
 
 const WHOAREYOU_STRING: &str = "WHOAREYOU";
 const NONCE_STRING: &str = "discovery-id-nonce";
-
-//TODO: This is short for testing.
-const SESSION_TIMEOUT: u64 = 30;
 
 pub struct Session {
     status: SessionStatus,
@@ -273,6 +271,10 @@ impl Session {
         aad: &[u8],
     ) -> Result<Vec<u8>, Discv5Error> {
         crypto::decrypt_message(&self.keys.decryption_key, nonce, message, aad)
+    }
+
+    pub fn increment_timeout(&mut self, secs: u64) {
+        self.timeout = Some(Delay::new(Instant::now() + Duration::from_secs(secs)));
     }
 
     pub fn timeout(&mut self) -> &mut Option<Delay> {
