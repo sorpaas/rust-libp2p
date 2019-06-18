@@ -119,7 +119,6 @@ fn main() {
                     }
                     _ => (),
                 },
-                Async::Ready(Some(_)) => (),
                 Async::Ready(None) | Async::NotReady => break,
             }
         }

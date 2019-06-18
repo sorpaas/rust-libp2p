@@ -138,11 +138,6 @@ where
         }
     }
 
-    /// Returns the local key.
-    pub fn local_key(&self) -> &Key<TPeerId> {
-        &self.local_key
-    }
-
     /// Returns an `Entry` for the given key, representing the state of the entry
     /// in the routing table.
     pub fn entry<'a>(&'a mut self, key: &'a Key<TPeerId>) -> Entry<'a, TPeerId, TVal> {
@@ -172,20 +167,6 @@ where
                 },
                 status,
             })
-        })
-    }
-
-    /// Returns a by-reference iterator over all buckets.
-    ///
-    /// The buckets are ordered by proximity to the `local_key`, i.e. the first
-    /// bucket is the closest bucket (containing at most one key).
-    pub fn buckets<'a>(&'a mut self) -> impl Iterator<Item = KBucketRef<'a, TPeerId, TVal>> + 'a {
-        let applied_pending = &mut self.applied_pending;
-        self.buckets.iter_mut().map(move |b| {
-            if let Some(applied) = b.apply_pending() {
-                applied_pending.push_back(applied)
-            }
-            KBucketRef(b)
         })
     }
 
@@ -253,32 +234,6 @@ where
         }
     }
 
-    /// Returns an iterator over the nodes closest to the `target` key, ordered by
-    /// increasing distance.
-    pub fn closest<'a, T>(
-        &'a mut self,
-        target: &'a Key<T>,
-    ) -> impl Iterator<Item = EntryView<TPeerId, TVal>> + 'a
-    where
-        T: Clone,
-        TVal: Clone,
-    {
-        let distance = self.local_key.distance(target);
-        ClosestIter {
-            target,
-            iter: None,
-            table: self,
-            buckets_iter: ClosestBucketsIter::new(distance),
-            fmap: |b: &KBucket<_, TVal>| -> ArrayVec<_> {
-                b.iter()
-                    .map(|(n, status)| EntryView {
-                        node: n.clone(),
-                        status,
-                    })
-                    .collect()
-            },
-        }
-    }
 }
 
 /// An iterator over (some projection of) the closest entries in a
@@ -430,24 +385,6 @@ where
                 }
             }
         }
-    }
-}
-
-/// A reference to a bucket in a `KBucketsTable`.
-pub struct KBucketRef<'a, TPeerId, TVal>(&'a mut KBucket<TPeerId, TVal>);
-
-impl<TPeerId, TVal> KBucketRef<'_, TPeerId, TVal>
-where
-    TPeerId: Clone,
-{
-    /// Returns the number of entries in the bucket.
-    pub fn num_entries(&self) -> usize {
-        self.0.num_entries()
-    }
-
-    /// Returns true if the bucket has a pending node.
-    pub fn has_pending(&self) -> bool {
-        self.0.pending().map_or(false, |n| !n.is_ready())
     }
 }
 

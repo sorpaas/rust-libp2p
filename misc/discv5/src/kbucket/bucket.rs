@@ -25,6 +25,8 @@
 //! > buckets in a `KBucketsTable` and hence is enforced by the public API
 //! > of the `KBucketsTable` and in particular the public `Entry` API.
 
+#![allow(dead_code)]
+
 use super::*;
 
 /// Maximum number of nodes in a bucket, i.e. the (fixed) `k` parameter.
@@ -57,9 +59,6 @@ pub enum NodeStatus {
 }
 
 impl<TPeerId, TVal> PendingNode<TPeerId, TVal> {
-    pub fn key(&self) -> &Key<TPeerId> {
-        &self.node.key
-    }
 
     pub fn status(&self) -> NodeStatus {
         self.status
@@ -67,10 +66,6 @@ impl<TPeerId, TVal> PendingNode<TPeerId, TVal> {
 
     pub fn value_mut(&mut self) -> &mut TVal {
         &mut self.node.value
-    }
-
-    pub fn is_ready(&self) -> bool {
-        Instant::now() >= self.replace
     }
 
     pub fn set_ready_at(&mut self, t: Instant) {
@@ -187,11 +182,6 @@ where
     /// with a matching key.
     pub fn as_pending(&self, key: &Key<TPeerId>) -> Option<&PendingNode<TPeerId, TVal>> {
         self.pending().filter(|p| &p.node.key == key)
-    }
-
-    /// Returns a reference to a node in the bucket.
-    pub fn get(&self, key: &Key<TPeerId>) -> Option<&Node<TPeerId, TVal>> {
-        self.position(key).map(|p| &self.nodes[p.0])
     }
 
     /// Returns an iterator over the nodes in the bucket, together with their status.
@@ -378,10 +368,6 @@ where
         }
     }
 
-    /// Checks whether the given position refers to a connected node.
-    pub fn is_connected(&self, pos: Position) -> bool {
-        self.status(pos) == NodeStatus::Connected
-    }
 
     /// Gets the number of entries currently in the bucket.
     pub fn num_entries(&self) -> usize {

@@ -40,22 +40,6 @@ pub struct NodeRefView<'a, TPeerId, TVal> {
     pub value: &'a TVal
 }
 
-impl<TPeerId, TVal> EntryRefView<'_, TPeerId, TVal> {
-    pub fn to_owned(&self) -> EntryView<TPeerId, TVal>
-    where
-        TPeerId: Clone,
-        TVal: Clone
-    {
-        EntryView {
-            node: Node {
-                key: self.node.key.clone(),
-                value: self.node.value.clone()
-            },
-            status: self.status
-        }
-    }
-}
-
 /// A cloned, immutable view of an entry that is either present in a bucket
 /// or pending insertion.
 #[derive(Clone, Debug)]
@@ -110,56 +94,6 @@ where
         }
     }
 
-    /// Creates an immutable by-reference view of the entry.
-    ///
-    /// Returns `None` if the entry is neither present in a bucket nor
-    /// pending insertion into a bucket.
-    pub fn view(&'a mut self) -> Option<EntryRefView<'a, TPeerId, TVal>> {
-        match self {
-            Entry::Present(entry, status) => Some(EntryRefView {
-                node: NodeRefView {
-                    key: entry.0.key,
-                    value: entry.value()
-                },
-                status: *status
-            }),
-            Entry::Pending(entry, status) => Some(EntryRefView {
-                node: NodeRefView {
-                    key: entry.0.key,
-                    value: entry.value()
-                },
-                status: *status
-            }),
-            _ => None
-        }
-    }
-
-    /// Returns the key of the entry.
-    ///
-    /// Returns `None` if the `Key` used to construct this `Entry` is not a valid
-    /// key for an entry in a bucket, which is the case for the `local_key` of
-    /// the `KBucketsTable` referring to the local node.
-    pub fn key(&self) -> Option<&Key<TPeerId>> {
-        match self {
-            Entry::Present(entry, _) => Some(entry.key()),
-            Entry::Pending(entry, _) => Some(entry.key()),
-            Entry::Absent(entry) => Some(entry.key()),
-            Entry::SelfEntry => None,
-        }
-    }
-
-    /// Returns the value associated with the entry.
-    ///
-    /// Returns `None` if the entry absent from any bucket or refers to the
-    /// local node.
-    pub fn value(&mut self) -> Option<&mut TVal> {
-        match self {
-            Entry::Present(entry, _) => Some(entry.value()),
-            Entry::Pending(entry, _) => Some(entry.value()),
-            Entry::Absent(_) => None,
-            Entry::SelfEntry => None,
-        }
-    }
 }
 
 /// An entry present in a bucket.
@@ -172,11 +106,6 @@ where
 {
     fn new(bucket: &'a mut KBucket<TPeerId, TVal>, key: &'a Key<TPeerId>) -> Self {
         PresentEntry(EntryRef { bucket, key })
-    }
-
-    /// Returns the key of the entry.
-    pub fn key(&self) -> &Key<TPeerId> {
-        self.0.key
     }
 
     /// Returns the value associated with the key.
@@ -206,11 +135,6 @@ where
         PendingEntry(EntryRef { bucket, key })
     }
 
-    /// Returns the key of the entry.
-    pub fn key(&self) -> &Key<TPeerId> {
-        self.0.key
-    }
-
     /// Returns the value associated with the key.
     pub fn value(&mut self) -> &mut TVal {
         self.0.bucket
@@ -236,11 +160,6 @@ where
 {
     fn new(bucket: &'a mut KBucket<TPeerId, TVal>, key: &'a Key<TPeerId>) -> Self {
         AbsentEntry(EntryRef { bucket, key })
-    }
-
-    /// Returns the key of the entry.
-    pub fn key(&self) -> &Key<TPeerId> {
-        self.0.key
     }
 
     /// Attempts to insert the entry into a bucket.

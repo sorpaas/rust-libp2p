@@ -118,18 +118,6 @@ where
     TTarget: Into<Key<TTarget>> + Clone,
     TNodeId: Into<Key<TNodeId>> + Eq + Clone,
 {
-    /// Creates a new query with a default configuration.
-    pub fn new<I>(target: TTarget, known_closest_peers: I, iterations: usize) -> Self
-    where
-        I: IntoIterator<Item = Key<TNodeId>>,
-    {
-        Self::with_config(
-            QueryConfig::default(),
-            target,
-            known_closest_peers,
-            iterations,
-        )
-    }
 
     /// Creates a new query with the given configuration.
     pub fn with_config<I>(
@@ -304,28 +292,6 @@ where
         }
     }
 
-    /// Returns the list of peers for which the query is currently waiting
-    /// for results.
-    pub fn waiting(&self) -> impl Iterator<Item = &TNodeId> {
-        self.closest_peers
-            .values()
-            .filter_map(|peer| match peer.state {
-                QueryPeerState::Waiting => Some(peer.key.preimage()),
-                _ => None,
-            })
-    }
-
-    /// Returns the number of peers for which the query is currently
-    /// waiting for results.
-    pub fn num_waiting(&self) -> usize {
-        self.num_waiting
-    }
-
-    /// Returns true if the query is waiting for a response from the given peer.
-    pub fn is_waiting(&self, peer: &TNodeId) -> bool {
-        self.waiting().any(|p| peer == p)
-    }
-
     /// Advances the state of the query, potentially getting a new peer to contact.
     ///
     /// See [`QueryState`].
@@ -414,16 +380,6 @@ where
             self.progress = QueryProgress::Finished;
             QueryState::Finished
         }
-    }
-
-    /// Immediately transitions the query to [`QueryState::Finished`].
-    pub fn finish(&mut self) {
-        self.progress = QueryProgress::Finished
-    }
-
-    /// Checks whether the query has finished.
-    pub fn finished(&self) -> bool {
-        self.progress == QueryProgress::Finished
     }
 
     /// Consumes the query, returning the target and the closest peers.
