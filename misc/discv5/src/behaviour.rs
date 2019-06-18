@@ -25,7 +25,7 @@ use log::{debug, error, trace, warn};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr,SocketAddr};
 use std::{marker::PhantomData, time::Duration};
 use tokio::timer::Interval;
 use tokio_io::{AsyncRead, AsyncWrite};
@@ -95,10 +95,10 @@ impl<TSubstream> Discv5<TSubstream> {
     ///
     /// `local_enr` is the `ENR` representing the local node. This contains node identifying information, such
     /// as IP addresses and ports which we wish to broadcast to other nodes via this discovery
-    /// mechanism. The `ip` and `port` fields of the ENR will determine the ip/port that the discv5
-    /// `Service` will listen on.
-    pub fn new(local_enr: Enr, keypair: Keypair) -> io::Result<Self> {
-        let service = SessionService::new(local_enr.clone(), keypair.clone())?;
+    /// mechanism. The `listen_address` determines which address the UDP socket will listen on, and the udp `port` 
+    /// will be taken from the provided ENR.
+    pub fn new(local_enr: Enr, keypair: Keypair, listen_address: IpAddr) -> io::Result<Self> {
+        let service = SessionService::new(local_enr.clone(), keypair.clone(), listen_address)?;
         let query_config = QueryConfig::default();
 
         Ok(Discv5 {

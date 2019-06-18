@@ -9,7 +9,8 @@
 //! participating node in the command line. The nodes should discover each other over a period
 //! of time. (It is probabilistic that nodes to find each other on any given query).
 //!
-//! A single instance listening on a udp socket `127.0.0.1:9000` can be created via:
+//! A single instance listening on a udp socket `0.0.0.0:9000` (with an ENR IP address of
+//! 127.0.0.1) can be created via:
 //!
 //! ```sh
 //! cargo run --example discv5
@@ -17,7 +18,7 @@
 //!
 //! This will display the created ENR record for the node.
 //!
-//! An IP address, port and ENR node can also be passed as command line options.
+//! An ENR IP address (to allow another nodes to dial this service), port and ENR node can also be passed as command line options.
 //!
 //! More specifically,
 //!
@@ -77,7 +78,7 @@ fn main() {
     let transport = libp2p::build_development_transport(keypair.clone());
 
     // construct the discv5 swarm, initializing an unused transport layer
-    let discv5 = libp2p::discv5::Discv5::new(enr, keypair.clone()).unwrap();
+    let discv5 = libp2p::discv5::Discv5::new(enr, keypair.clone(), "0.0.0.0".parse::<Ipv4Addr>().unwrap().into()).unwrap();
     let mut swarm = libp2p::Swarm::new(transport, discv5, keypair.public().into_peer_id());
 
     // if we know of another peer's ENR, add it known peers

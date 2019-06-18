@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::default::Default;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, IpAddr};
 use std::time::{Duration, Instant};
 use tokio::timer::Delay;
 
@@ -68,16 +68,13 @@ pub struct SessionService {
 
 impl SessionService {
     /// A new Session service which instantiates the UDP socket.
-    pub fn new(enr: Enr, keypair: Keypair) -> io::Result<Self> {
+    pub fn new(enr: Enr, keypair: Keypair, ip: IpAddr) -> io::Result<Self> {
         // ensure the keypair matches the one that signed the enr.
         if enr.public_key().into_protobuf_encoding() != keypair.public().into_protobuf_encoding() {
             panic!("Discv5: Provided keypair does not match the provided ENR keypair");
         }
 
         let udp = enr.udp().unwrap_or_else(|| 9000);
-        let ip = enr
-            .ip()
-            .unwrap_or_else(|| "127.0.0.1".parse().expect("valid IP"));
 
         let socket_addr = SocketAddr::new(ip, udp);
         // generates the WHOAREYOU magic packet for the local node-id
