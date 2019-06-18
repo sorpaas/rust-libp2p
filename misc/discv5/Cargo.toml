@@ -10,8 +10,8 @@ keywords = ["peer-to-peer", "libp2p", "networking", "discovery", "devp2p"]
 categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-libp2p-core = { version = "0.8.0", path = "../../core" }
-multiaddr = { package = "parity-multiaddr", version = "0.4.0", path = "../multiaddr" }
+libp2p-core = { version = "0.9.0", path = "../../core" }
+multiaddr = { package = "parity-multiaddr", version = "0.5.0", path = "../multiaddr" }
 multihash = { package = "parity-multihash", version = "0.1.0", path = "../../misc/multihash" }
 enr = { path = "../enr" }
 data-encoding = "2.0"
@@ -42,6 +42,6 @@ arrayvec = "0.4.10"
 tokio-timer = "0.2.11"
 tokio = "0.1.20"
 quickcheck = "0.8"
-libp2p-secio = { version = "0.8.0", path = "../../protocols/secio" }
-libp2p-yamux = { version = "0.8.0", path = "../../muxers/yamux" }
+libp2p-secio = { version = "0.9.0", path = "../../protocols/secio" }
+libp2p-yamux = { version = "0.9.0", path = "../../muxers/yamux" }
 env_logger = "0.6.1"
