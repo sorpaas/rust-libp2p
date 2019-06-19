@@ -56,7 +56,7 @@ impl Discv5Service {
                 }
                 Ok(Async::NotReady) => {
                     // didn't write add back and break
-                    debug!("Couldn't write to socket");
+                    debug!("Couldn't write to UDP socket");
                     self.send_queue.insert(0, (dst, packet));
                     // notify to try again
                     task::current().notify();

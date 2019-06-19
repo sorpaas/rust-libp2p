@@ -727,4 +727,29 @@ mod tests {
             "/ip4/10.0.0.1/tcp/30303".parse().unwrap()
         );
     }
+
+    #[test]
+    fn ip_mutation_static_node_id() {
+        let key = Keypair::generate_secp256k1();
+        let tcp = 30303;
+        let udp = 30304;
+        let ip = Ipv4Addr::new(10, 0, 0, 1);
+
+        let mut enr = {
+            let mut builder = EnrBuilder::new();
+            builder.ip(ip.into());
+            builder.tcp(tcp);
+            builder.udp(udp);
+            builder.build(&key).unwrap()
+        };
+
+        let node_id = enr.node_id().clone();
+
+        enr.set_udp_socket(
+            "192.168.0.1:800".parse::<SocketAddr>().unwrap().into(),
+            &key,
+        )
+        .unwrap();
+        assert_eq!(node_id, *enr.node_id())
+    }
 }

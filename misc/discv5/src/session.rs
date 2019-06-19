@@ -18,6 +18,7 @@ use crate::Discv5Error;
 use enr::{Enr, NodeId};
 use libp2p_core::identity::Keypair;
 use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::timer::Delay;
 use zeroize::Zeroize;
@@ -26,17 +27,34 @@ const WHOAREYOU_STRING: &str = "WHOAREYOU";
 const NONCE_STRING: &str = "discovery-id-nonce";
 
 pub struct Session {
+    /// The current state of the Session
     status: SessionStatus,
-    remote_enr: Option<Enr>,       // can be None for WHOAREYOU sessions.
-    ephem_pubkey: Option<Vec<u8>>, // ephemeral key is stored as encoded bytes
+
+    /// The ENR of the remote node. This may be unknown during `WhoAreYouSent` states.
+    remote_enr: Option<Enr>,
+
+    /// The ephemeral public key of the session.
+    ephem_pubkey: Option<Vec<u8>>,
+
+    /// The established session keys.
     keys: Keys,
+
+    /// Last seen IP address and port. This is used to determine if the session is trusted or not.
+    last_seen_socket: SocketAddr,
+
+    /// The Delay when this session expires.
     timeout: Option<Delay>,
 }
 
 #[derive(Zeroize)]
 pub struct Keys {
+    /// The Authentication response key.
     pub auth_resp_key: [u8; 16],
+
+    /// The encryption key.
     pub encryption_key: [u8; 16],
+
+    /// The decryption key.
     pub decryption_key: [u8; 16],
 }
 
@@ -52,8 +70,18 @@ impl Keys {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum SessionStatus {
-    WhoAreYouSent, // WHOAREYOU packet has been sent, awaiting an auth response
-    RandomSent,    // Sent a random packet, awaiting a WHOAREYOU response
+    /// A WHOAREYOU packet has been sent, and the Session is awaiting an Authentication response.
+    WhoAreYouSent,
+
+    /// A RANDOM packet has been sent and the Session is awaiting a WHOAREYOU response.
+    RandomSent,
+
+    /// A Session has been established, but the IP address of the remote ENR does not match the IP
+    /// of the source. In this state, the service will respond to requests, but does not treat the node as
+    /// connected until the IP is updated to match the source IP.
+    Untrusted,
+
+    /// A Session has been established and the ENR IP matches the source IP.
     Established,
 }
 
@@ -66,7 +94,8 @@ impl Session {
             remote_enr: Some(remote_enr),
             ephem_pubkey: None,
             keys: Keys::new(),
-            timeout: None, // we don't timeout until the session is established
+            timeout: None, // don't timeout until the session is established
+            last_seen_socket: "0.0.0.0:0".parse::<SocketAddr>().expect("Valid Socket"),
         };
 
         (session, random_packet)
@@ -106,7 +135,8 @@ impl Session {
             remote_enr,
             ephem_pubkey: None,
             keys: Keys::new(),
-            timeout: None, // we don't timeout until the session is established
+            timeout: None, // don't timeout until the session is established
+            last_seen_socket: "0.0.0.0:0".parse::<SocketAddr>().expect("Valid Socket"),
         };
 
         (session, whoareyou_packet)
@@ -189,7 +219,10 @@ impl Session {
         nonce
     }
 
-    pub fn generate_keys_from_header(
+    /// Generates a session from an authentication header. If the IP of the ENR does not match the
+    /// source IP address, we consider this session untrusted. The output returns a boolean which
+    /// specifies if the Session is trusted or not.
+    pub fn establish_from_header(
         &mut self,
         tag: Tag,
         local_keypair: &Keypair,
@@ -197,9 +230,8 @@ impl Session {
         remote_id: &NodeId,
         id_nonce: Nonce,
         auth_header: &AuthHeader,
-    ) -> Result<Option<Enr>, Discv5Error> {
+    ) -> Result<bool, Discv5Error> {
         // generate session keys
-
         let (decryption_key, encryption_key, auth_resp_key) = crypto::derive_keys_from_pubkey(
             local_keypair,
             local_id,
@@ -212,21 +244,16 @@ impl Session {
         let auth_response =
             crypto::decrypt_authentication_header(&auth_resp_key, auth_header, &tag)?;
 
-        // to inform if we have updated the ENR record of the session.
-        let mut updated_enr = None;
-
         // check and verify a potential ENR update
         if let Some(enr) = auth_response.updated_enr {
             if let Some(remote_enr) = &self.remote_enr {
                 // verify the enr-seq number
                 if remote_enr.seq < enr.seq {
                     self.remote_enr = Some(enr.clone());
-                    updated_enr = self.remote_enr.clone();
                 } // ignore ENR's that have a lower seq number
             } else {
                 // update the ENR
                 self.remote_enr = Some(enr.clone());
-                updated_enr = self.remote_enr.clone();
             }
         } else if self.remote_enr.is_none() {
             // didn't receive the remote's ENR
@@ -259,9 +286,9 @@ impl Session {
             Instant::now() + Duration::from_secs(SESSION_TIMEOUT),
         ));
 
-        self.status = SessionStatus::Established;
-
-        Ok(updated_enr)
+        self.status = SessionStatus::Untrusted;
+        // output if the session is trusted or untrusted
+        Ok(self.update_trusted())
     }
 
     pub fn decrypt_message(
@@ -271,6 +298,34 @@ impl Session {
         aad: &[u8],
     ) -> Result<Vec<u8>, Discv5Error> {
         crypto::decrypt_message(&self.keys.decryption_key, nonce, message, aad)
+    }
+
+    pub fn update_enr(&mut self, enr: Enr) -> bool {
+        if let Some(remote_enr) = &self.remote_enr {
+            if remote_enr.seq < enr.seq {
+                self.remote_enr = Some(enr);
+                // ENR has been updated. Check if the state can be promoted to trusted
+                return self.update_trusted();
+            }
+        }
+        false
+    }
+
+    /// Checks to see if the Session can be promoted to a trusted state, if so, updates the state.
+    pub fn update_trusted(&mut self) -> bool {
+        if let SessionStatus::Untrusted = self.status {
+            if let Some(remote_enr) = &self.remote_enr {
+                if Some(self.last_seen_socket) == remote_enr.udp_socket() {
+                    self.status = SessionStatus::Established;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn set_last_seen_socket(&mut self, socket: SocketAddr) {
+        self.last_seen_socket = socket;
     }
 
     pub fn increment_timeout(&mut self, secs: u64) {
@@ -294,6 +349,7 @@ impl Session {
             SessionStatus::WhoAreYouSent => false,
             SessionStatus::RandomSent => false,
             SessionStatus::Established => true,
+            SessionStatus::Untrusted => true,
         }
     }
 }
