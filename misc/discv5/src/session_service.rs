@@ -9,6 +9,11 @@
 //! session timeouts and received messages. Messages are encrypted and decrypted using the
 //! associated `Session` for each node.
 //!
+//! An ongoing connection is managed by the `Session` struct. A node that provides and ENR with an
+//! IP address/port that doesn't match the source, is considered untrusted. Once the IP is updated
+//! to match the source, the `Session` is promoted to an established state. RPC requests are not sent
+//! to untrusted Sessions, only responses.
+//!
 //TODO: Document the Event structure and WHOAREYOU requests to the protocol layer.
 
 use super::packet::{AuthHeader, AuthResponse, AuthTag, Magic, Nonce, Packet, Tag, TAG_LENGTH};
@@ -107,6 +112,8 @@ impl SessionService {
     /// Updates a session if a new ENR or an updated ENR is discovered.
     pub fn update_enr(&mut self, enr: Enr) {
         if let Some(session) = self.sessions.get_mut(enr.node_id()) {
+            // if an ENR is updated to an address that was not the last seen address of the
+            // session, we demote the session to untrusted.
             if session.update_enr(enr.clone()) {
                 // A session have been promoted to established. Noftify the protocol
                 self.events.push_back(SessionEvent::Established(enr));
@@ -168,7 +175,17 @@ impl SessionService {
             }
         };
 
-        // session is established, encrypt the message and send
+        // session is established,
+        // only send to trusted sessions
+        if !session.is_trusted() {
+            debug!(
+                "Tried to send a request to an untrusted node, ignoring. Node: {}",
+                dst_id
+            );
+            return Err(Discv5Error::SessionNotEstablished);
+        }
+
+        // encrypt the message and send
         let packet = session
             .encrypt_message(self.tag(&dst_id), &message.clone().encode())
             .map_err(|e| {

@@ -26,6 +26,10 @@ use zeroize::Zeroize;
 const WHOAREYOU_STRING: &str = "WHOAREYOU";
 const NONCE_STRING: &str = "discovery-id-nonce";
 
+/// Manages active handshakes and connections between nodes in discv5. There are three main states
+/// a session can be in, intializing (`WhoAreYouSent` or `RandomSent`), `Untrusted` (when the
+/// socket address of the ENR doesn't match the `last_seen_socket`) and `Established` (the session
+/// has been successfully established).
 pub struct Session {
     /// The current state of the Session
     status: SessionStatus,
@@ -311,13 +315,21 @@ impl Session {
         false
     }
 
-    /// Checks to see if the Session can be promoted to a trusted state, if so, updates the state.
+    /// Updates the trusted status of a Session. It can be promoted to an `established` state, or
+    /// demoted to an `untrusted` state. This value returns true if the Session has been
+    /// promoted.
     pub fn update_trusted(&mut self) -> bool {
         if let SessionStatus::Untrusted = self.status {
             if let Some(remote_enr) = &self.remote_enr {
                 if Some(self.last_seen_socket) == remote_enr.udp_socket() {
                     self.status = SessionStatus::Established;
                     return true;
+                }
+            }
+        } else if let SessionStatus::Established = self.status {
+            if let Some(remote_enr) = &self.remote_enr {
+                if Some(self.last_seen_socket) != remote_enr.udp_socket() {
+                    self.status = SessionStatus::Untrusted;
                 }
             }
         }
@@ -342,6 +354,14 @@ impl Session {
 
     pub fn remote_enr(&self) -> &Option<Enr> {
         &self.remote_enr
+    }
+
+    pub fn is_trusted(&self) -> bool {
+        if let SessionStatus::Established = self.status {
+            true
+        } else {
+            false
+        }
     }
 
     pub fn established(&self) -> bool {
