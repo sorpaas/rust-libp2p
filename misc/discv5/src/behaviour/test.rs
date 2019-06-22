@@ -51,7 +51,7 @@ fn build_swarms(n: usize) -> Vec<SwarmType> {
             })
             .map_err(|e| panic!("Failed to create transport: {:?}", e))
             .boxed();
-        let discv5 = Discv5::new(enr, keypair.clone()).unwrap();
+        let discv5 = Discv5::new(enr, keypair.clone(), ip.into()).unwrap();
         swarms.push(Swarm::new(
             transport,
             discv5,

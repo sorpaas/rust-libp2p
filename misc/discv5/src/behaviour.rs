@@ -1,6 +1,4 @@
-//! The libp2p behaviour which implements [discovery v5](https://github.com/ethereum/devp2p/blob/master/discv5/discv5.md).
-
-//TODO: Document the behaviour
+//! The protocol behaviour of Discovery v5. See `lib.rs` for further details.
 
 use self::ip_vote::IpVote;
 use self::query_info::{QueryInfo, QueryType};
@@ -41,13 +39,6 @@ type RpcId = u64;
 struct RpcRequest(RpcId, NodeId);
 
 pub struct Discv5<TSubstream> {
-    /// The local ENR for this node.
-    local_enr: Enr,
-
-    /// The keypair for the current node. Required to sign our local ENR when our address is
-    /// updated.
-    keypair: Keypair,
-
     /// Events yielded by this behaviour.
     events: SmallVec<[Discv5Event; 32]>,
 
@@ -102,8 +93,6 @@ impl<TSubstream> Discv5<TSubstream> {
         let query_config = QueryConfig::default();
 
         Ok(Discv5 {
-            local_enr: local_enr.clone(),
-            keypair,
             events: SmallVec::new(),
             known_peer_ids: HashMap::new(),
             kbuckets: KBucketsTable::new(
@@ -168,7 +157,7 @@ impl<TSubstream> Discv5<TSubstream> {
     }
 
     pub fn local_enr(&self) -> &Enr {
-        &self.local_enr
+        &self.service.enr()
     }
 
     /// Returns an iterator over all ENR node IDs of nodes currently contained in a bucket
@@ -204,7 +193,7 @@ impl<TSubstream> Discv5<TSubstream> {
                         id: rpc_id,
                         body: rpc::RpcType::Response(rpc::Response::Nodes {
                             total: 1,
-                            nodes: vec![self.local_enr.clone()],
+                            nodes: vec![self.local_enr().clone()],
                         }),
                     };
                     debug!("Sending our ENR to node: {}", node_id);
@@ -237,7 +226,7 @@ impl<TSubstream> Discv5<TSubstream> {
                 let response = rpc::ProtocolMessage {
                     id: rpc_id,
                     body: rpc::RpcType::Response(rpc::Response::Ping {
-                        enr_seq: self.local_enr.seq,
+                        enr_seq: self.local_enr().seq,
                         ip: src.ip(),
                         port: src.port(),
                     }),
@@ -311,10 +300,9 @@ impl<TSubstream> Discv5<TSubstream> {
                 rpc::Response::Ping { enr_seq, ip, port } => {
                     let socket = SocketAddr::new(ip, port);
                     self.ip_votes.insert(node_id.clone(), socket);
-                    if self.ip_votes.majority() != self.local_enr.udp_socket() {
+                    if self.ip_votes.majority() != self.local_enr().udp_socket() {
                         info!("Local IP Address updated to: {:?}", socket);
-                        let _ = self.local_enr.set_udp_socket(socket, &self.keypair);
-                        self.service.set_enr(self.local_enr.clone());
+                        let _ = self.service.set_udp_socket(socket);
                         // alert known peers to our updated enr
                         self.ping_connected_peers();
                     }
@@ -341,7 +329,7 @@ impl<TSubstream> Discv5<TSubstream> {
     /// Sends a PING request to a node.
     fn send_ping(&mut self, node_id: &NodeId) {
         let req = rpc::Request::Ping {
-            enr_seq: self.local_enr.seq,
+            enr_seq: self.local_enr().seq,
         };
         self.send_rpc_request(&node_id, req, None);
     }
@@ -570,8 +558,8 @@ impl<TSubstream> Discv5<TSubstream> {
 
     /// Processes discovered peers from a query.
     fn discovered(&mut self, source: &NodeId, peers: Vec<Enr>, query_id: Option<QueryId>) {
-        let local_id = self.local_enr.node_id();
-        let others_iter = peers.into_iter().filter(|p| p.node_id() != local_id);
+        let local_id = self.local_enr().node_id().clone();
+        let others_iter = peers.into_iter().filter(|p| p.node_id() != &local_id);
 
         for peer in others_iter.clone() {
             self.events.push(Discv5Event::Discovered {

@@ -12,7 +12,6 @@
 //! peers.
 
 use super::packet::{AuthHeader, AuthTag, Nonce, Packet, Tag, MAGIC_LENGTH};
-use crate::crypto;
 use crate::session_service::SESSION_TIMEOUT;
 use crate::Discv5Error;
 use enr::{Enr, NodeId};
@@ -22,6 +21,8 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::timer::Delay;
 use zeroize::Zeroize;
+
+mod crypto;
 
 const WHOAREYOU_STRING: &str = "WHOAREYOU";
 const NONCE_STRING: &str = "discovery-id-nonce";

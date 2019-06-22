@@ -3,14 +3,16 @@ use super::*;
 use crate::rpc::{Request, RpcType};
 use enr::EnrBuilder;
 use libp2p_core::identity::Keypair;
-//use simple_logger;
 use std::net::IpAddr;
 use tokio::prelude::*;
-use tokio_timer::Delay;
+
+fn init() {
+    let _ = env_logger::builder().is_test(true).try_init();
+}
 
 #[test]
 fn simple_session_message() {
-    //let _ = simple_logger::init_with_level(log::Level::Debug);
+    init();
 
     let sender_port = 5000;
     let receiver_port = 5001;
@@ -29,12 +31,10 @@ fn simple_session_message() {
         .build(&keypair_2)
         .unwrap();
 
-    let mut sender_service = SessionService::new(sender_enr.clone(), keypair.clone()).unwrap();
+    let mut sender_service =
+        SessionService::new(sender_enr.clone(), keypair.clone(), ip.into()).unwrap();
     let mut receiver_service =
-        SessionService::new(receiver_enr.clone(), keypair_2.clone()).unwrap();
-
-    // send a message after 1 second
-    let mut delay = Delay::new(Instant::now() + Duration::from_millis(100)).fuse();
+        SessionService::new(receiver_enr.clone(), keypair_2.clone(), ip.into()).unwrap();
 
     let send_message = ProtocolMessage {
         id: 1,
@@ -43,14 +43,10 @@ fn simple_session_message() {
 
     let receiver_send_message = send_message.clone();
 
+    let _ = sender_service.send_request(&receiver_enr, send_message);
+
     let sender = future::poll_fn(move || -> Poll<(), ()> {
         loop {
-            match delay.poll() {
-                Ok(Async::Ready(_)) => {
-                    let _ = sender_service.send_message(&receiver_enr, send_message.clone(), None);
-                }
-                Ok(Async::NotReady) | Err(_) => {}
-            }
             match sender_service.poll() {
                 Async::Ready(_) => {}
                 Async::NotReady => return Ok(Async::NotReady),
@@ -96,7 +92,7 @@ fn simple_session_message() {
 
 #[test]
 fn multiple_messages() {
-    //let _ = simple_logger::init_with_level(log::Level::Debug);
+    init();
     let sender_port = 5002;
     let receiver_port = 5003;
     let ip: IpAddr = "127.0.0.1".parse().unwrap();
@@ -114,12 +110,10 @@ fn multiple_messages() {
         .build(&keypair_2)
         .unwrap();
 
-    let mut sender_service = SessionService::new(sender_enr.clone(), keypair.clone()).unwrap();
+    let mut sender_service =
+        SessionService::new(sender_enr.clone(), keypair.clone(), ip.into()).unwrap();
     let mut receiver_service =
-        SessionService::new(receiver_enr.clone(), keypair_2.clone()).unwrap();
-
-    // send a message after 1 second
-    let mut delay = Delay::new(Instant::now() + Duration::from_millis(100)).fuse();
+        SessionService::new(receiver_enr.clone(), keypair_2.clone(), ip.into()).unwrap();
 
     let send_message = ProtocolMessage {
         id: 1,
@@ -128,20 +122,16 @@ fn multiple_messages() {
 
     let receiver_send_message = send_message.clone();
 
-    let mut message_count = 0;
     let messages_to_send = 5;
+
+    for _ in 0..messages_to_send {
+        let _ = sender_service.send_request(&receiver_enr, send_message.clone());
+    }
+
+    let mut message_count = 0;
 
     let sender = future::poll_fn(move || -> Poll<(), ()> {
         loop {
-            match delay.poll() {
-                Ok(Async::Ready(_)) => {
-                    for _ in 0..messages_to_send {
-                        let _ =
-                            sender_service.send_message(&receiver_enr, send_message.clone(), None);
-                    }
-                }
-                Ok(Async::NotReady) | Err(_) => {}
-            }
             match sender_service.poll() {
                 Async::Ready(_) => {}
                 Async::NotReady => return Ok(Async::NotReady),

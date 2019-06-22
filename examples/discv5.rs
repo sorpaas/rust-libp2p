@@ -1,36 +1,26 @@
 //! Demonstrates how to run a basic Discovery v5 Service.
 //!
 //! This example creates a libp2p discv5 service which searches for peers every 30 seconds. On
-//! creation, the local ENR created for this service is displayed in base64. This can be
-//! used to allow other instances to connect and join the network. The service can be stopped
-//! by pressing Ctrl-C.
+//! creation, the local ENR created for this service is displayed in base64. This can be used to
+//! allow other instances to connect and join the network. The service can be stopped by pressing
+//! Ctrl-C.
 //!
 //! To add peers to the network, create multiple instances of this service adding the ENR of a
-//! participating node in the command line. The nodes should discover each other over a period
-//! of time. (It is probabilistic that nodes to find each other on any given query).
+//! participating node in the command line. The nodes should discover each other over a period of
+//! time. (It is probabilistic that nodes to find each other on any given query).
 //!
 //! A single instance listening on a udp socket `0.0.0.0:9000` (with an ENR IP address of
 //! 127.0.0.1) can be created via:
 //!
-//! ```sh
-//! cargo run --example discv5
-//! ```
+//! ```sh cargo run --example discv5 ```
 //!
 //! This will display the created ENR record for the node.
 //!
-//! An ENR IP address (to allow another nodes to dial this service), port and ENR node can also be passed as command line options.
+//! An ENR IP address (to allow another nodes to dial this service), port and ENR node can also be
+//! passed as command line options. Therefore, a second instance, in a new terminal, can be run on
+//! port 9001 and connected to the first via:
 //!
-//! More specifically,
-//!
-//! ```sh
-//! cargo run --example discv5 -- 127.0.0.1 9001 <Base64-ENR>
-//! ```
-//!
-//! Therefore, a second instance, in a new terminal, can be run on port 9001 and connected to the first via:
-//!
-//! ```sh
-//! cargo run --example discv5 -- 127.0.0.1 9001 <Base64-ENR>
-//! ```
+//! ```sh cargo run --example discv5 -- 127.0.0.1 9001 <Base64-ENR> ```
 //!
 //! where `<Base64-ENR>` is the base64 ENR given from executing the first node. These steps can be
 //! repeated to add further nodes to the network.
@@ -78,7 +68,12 @@ fn main() {
     let transport = libp2p::build_development_transport(keypair.clone());
 
     // construct the discv5 swarm, initializing an unused transport layer
-    let discv5 = libp2p::discv5::Discv5::new(enr, keypair.clone(), "0.0.0.0".parse::<Ipv4Addr>().unwrap().into()).unwrap();
+    let discv5 = libp2p::discv5::Discv5::new(
+        enr,
+        keypair.clone(),
+        "0.0.0.0".parse::<Ipv4Addr>().unwrap().into(),
+    )
+    .unwrap();
     let mut swarm = libp2p::Swarm::new(transport, discv5, keypair.public().into_peer_id());
 
     // if we know of another peer's ENR, add it known peers

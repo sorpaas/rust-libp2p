@@ -40,7 +40,9 @@ mod tests;
 const REQUEST_TIMEOUT: u64 = 10;
 /// The number of times to retry a request.
 const REQUEST_RETRIES: u8 = 2;
-pub const SESSION_TIMEOUT: u64 = 30;
+/// The timeout for a Session.
+//TODO: Make this a function of messages sent, to prevent nonce replay
+pub const SESSION_TIMEOUT: u64 = 86400;
 
 pub struct SessionService {
     /// Queue of events produced by the session service.
@@ -104,9 +106,18 @@ impl SessionService {
         })
     }
 
-    /// Update the local ENR.
-    pub fn set_enr(&mut self, enr: Enr) {
-        self.enr = enr
+    /// The local ENR of the service.
+    pub fn enr(&self) -> &Enr {
+        &self.enr
+    }
+
+    pub fn set_udp_socket(&mut self, socket: SocketAddr) {
+        match self.enr.set_udp_socket(socket, &self.keypair) {
+            Ok(_) => {}
+            Err(e) => {
+                warn!("Could not update the ENR IP address. Error: {:?}", e);
+            }
+        }
     }
 
     /// Updates a session if a new ENR or an updated ENR is discovered.
