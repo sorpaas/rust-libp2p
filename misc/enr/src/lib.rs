@@ -49,8 +49,8 @@ use indexmap::IndexMap;
 use libp2p_core::identity::{ed25519, Keypair, PublicKey};
 use log::debug;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
-use std::convert::TryFrom;
 use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
 
 use libp2p_core::{
     identity::{rsa, secp256k1 as libp2p_secp256k1},
@@ -358,11 +358,11 @@ impl std::fmt::Debug for Enr {
 }
 
 /// Convert a URL-SAFE base64 encoded ENR into an ENR.
-impl TryFrom<String> for Enr {
-    type Error = String;
+impl FromStr for Enr {
+    type Err = String;
 
-    fn try_from(base64_string: String) -> Result<Self, Self::Error> {
-        let bytes = base64::decode_config(&base64_string, base64::URL_SAFE)
+    fn from_str(base64_string: &str) -> Result<Self, Self::Err> {
+        let bytes = base64::decode_config(base64_string, base64::URL_SAFE)
             .map_err(|_| "Invalid base64 encoding")?;
         rlp::decode::<Enr>(&bytes).map_err(|e| format!("Invalid ENR: {:?}", e))
     }

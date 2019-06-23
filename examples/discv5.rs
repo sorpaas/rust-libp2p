@@ -28,7 +28,6 @@
 use futures::prelude::*;
 use libp2p::discv5::Discv5Event;
 use libp2p::identity;
-use std::convert::TryFrom;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -78,7 +77,7 @@ fn main() {
 
     // if we know of another peer's ENR, add it known peers
     if let Some(base64_enr) = std::env::args().nth(3) {
-        if let Ok(enr) = libp2p::enr::Enr::try_from(base64_enr) {
+        if let Ok(enr) = base64_enr.parse::<libp2p::enr::Enr>() {
             swarm.add_enr(enr);
         } else {
             panic!("Decoding ENR failed");
