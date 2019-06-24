@@ -49,6 +49,9 @@ use indexmap::IndexMap;
 use libp2p_core::identity::{ed25519, Keypair, PublicKey};
 use log::debug;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
+
+#[cfg(feature = "serde")]
+use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
@@ -339,6 +342,8 @@ impl Enr {
     }
 }
 
+// traits //
+
 impl std::fmt::Display for Enr {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
@@ -365,6 +370,27 @@ impl FromStr for Enr {
         let bytes = base64::decode_config(base64_string, base64::URL_SAFE)
             .map_err(|_| "Invalid base64 encoding")?;
         rlp::decode::<Enr>(&bytes).map_err(|e| format!("Invalid ENR: {:?}", e))
+    }
+}
+
+#[cfg(feature = "serde")]
+impl Serialize for Enr {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_base64())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for Enr {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: String = Deserialize::deserialize(deserializer)?;
+        Enr::from_str(&s).map_err(D::Error::custom)
     }
 }
 

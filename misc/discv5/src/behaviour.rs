@@ -1,4 +1,14 @@
 //! The protocol behaviour of Discovery v5. See `lib.rs` for further details.
+//!
+//!
+//! Note: Discovered ENR's are not automatically added to the routing table. Only established
+//! sessions get added, ensuring only valid ENR's are added. Manual additions can be made using the
+//! `add_enr()` function.
+//!
+//! Response to queries return `PeerId`'s. Only the trusted (a session has been established with)
+//! `PeerId`'s are returned, as ENR's for these `PeerId`'s are stored in the routing table and as
+//! such should have an address to connect to. Untrusted `PeerId`'s can be obtained from the
+//! `Discv5::Discovered` event, which is fired as peers get discovered.
 
 use self::ip_vote::IpVote;
 use self::query_info::{QueryInfo, QueryType};
@@ -301,7 +311,8 @@ impl<TSubstream> Discv5<TSubstream> {
                     let socket = SocketAddr::new(ip, port);
                     self.ip_votes.insert(node_id.clone(), socket);
                     if self.ip_votes.majority() != self.local_enr().udp_socket() {
-                        info!("Local IP Address updated to: {:?}", socket);
+                        info!("Local IP Address updated to: {}", socket);
+                        self.events.push(Discv5Event::SocketUpdated(socket));
                         let _ = self.service.set_udp_socket(socket);
                         // alert known peers to our updated enr
                         self.ping_connected_peers();
@@ -562,10 +573,7 @@ impl<TSubstream> Discv5<TSubstream> {
         let others_iter = peers.into_iter().filter(|p| p.node_id() != &local_id);
 
         for peer in others_iter.clone() {
-            self.events.push(Discv5Event::Discovered {
-                enr_id: peer.node_id().clone(),
-                addresses: peer.multiaddr().clone(),
-            });
+            self.events.push(Discv5Event::Discovered(peer.clone()));
 
             // If any of the discovered nodes are in the routing table, and there contains an older ENR, update it.
             let key = kbucket::Key::from(peer.node_id().clone());
@@ -861,7 +869,10 @@ where
                     QueryType::FindNode(node_id) => {
                         let event = Discv5Event::FindNodeResult {
                             key: node_id,
-                            closer_peers: result.closest_peers.collect(),
+                            closer_peers: result
+                                .closest_peers
+                                .filter_map(|p| self.find_enr(&p).and_then(|p| Some(p.peer_id())))
+                                .collect(),
                         };
                         return Async::Ready(NetworkBehaviourAction::GenerateEvent(event));
                     }
@@ -886,28 +897,30 @@ where
     }
 }
 
-// TODO: Potentially abstract ENR NodeId and use PeerId's for outer interface.
 /// Event that can be produced by the `Discv5` behaviour.
 #[derive(Debug)]
 pub enum Discv5Event {
-    /// Discovered nodes through discv5.
-    Discovered {
-        enr_id: NodeId,
-        addresses: Vec<Multiaddr>,
-    },
-    EnrAdded {
-        enr: Enr,
-        replaced: Option<Enr>,
-    },
+    /// A node has been discovered from a FINDNODES request.
+    ///
+    /// The ENR of the node is returned. Various properties can be derived from the ENR.
+    /// - `PeerId`: enr.peer_id()
+    /// - `Multiaddr`: enr.multiaddr()
+    /// - `NodeId`: enr.node_id()
+    Discovered(Enr),
+    /// A new ENR was added to the routing table.
+    EnrAdded { enr: Enr, replaced: Option<Enr> },
+    /// A new node has been added to the routing table.
     NodeInserted {
         node_id: NodeId,
         replaced: Option<NodeId>,
     },
+    /// Our local ENR IP address has been updated.
+    SocketUpdated(SocketAddr),
     /// Result of a `FIND_NODE` iterative query.
     FindNodeResult {
         /// The key that we looked for in the query.
         key: NodeId,
         /// List of peers ordered from closest to furthest away.
-        closer_peers: Vec<NodeId>,
+        closer_peers: Vec<PeerId>,
     },
 }

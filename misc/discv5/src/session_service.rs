@@ -343,12 +343,15 @@ impl SessionService {
 
         // the referenced request must come from the expected src
         if src != req.dst {
+            warn!(
+                "Incorrect WHOAREYOU packet source: {}, expected: {}",
+                src, req.dst
+            );
             // add the request back - order is unimportant
             self.pending_requests
                 .entry(src_id)
                 .or_insert_with(Vec::new)
                 .push(req);
-            warn!("Incorrect WHOAREYOU packet source");
             return Err(());
         }
 
