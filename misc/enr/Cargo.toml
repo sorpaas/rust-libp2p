@@ -1,0 +1,21 @@
+[package]
+name = "enr"
+version = "0.1.0"
+authors = ["Age Manning <Age@AgeManning.com>"]
+edition = "2018"
+
+[dependencies]
+libp2p-core = { version = "0.9.0", path = "../../core" }
+rlp = "0.3.0"
+log = "0.4"
+secp256k1 = "0.12.2"
+sha3 = "0.8.2"
+bs58 = "0.2.2"
+base64 = "0.10.1"
+rand = "0.6.5"
+hex = "0.3.2"
+indexmap = "1.0.2"
+serde = { version = "1.0.93", optional = true }
+
+[dev-dependencies]
+hex = "0.3.2"

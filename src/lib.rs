@@ -153,6 +153,7 @@
 #![doc(html_favicon_url = "https://libp2p.io/img/favicon.png")]
 
 pub use bytes;
+pub use enr;
 pub use futures;
 #[doc(inline)]
 pub use multiaddr;
@@ -166,6 +167,8 @@ pub use libp2p_core as core;
 #[doc(inline)]
 pub use libp2p_deflate as deflate;
 #[cfg(not(any(target_os = "emscripten", target_os = "unknown")))]
+#[doc(inline)]
+pub use libp2p_discv5 as discv5;
 #[doc(inline)]
 pub use libp2p_dns as dns;
 #[doc(inline)]
@@ -199,7 +202,10 @@ pub use libp2p_tcp as tcp;
 pub use libp2p_uds as uds;
 #[doc(inline)]
 pub use libp2p_wasm_ext as wasm_ext;
-#[cfg(all(feature = "libp2p-websocket", not(any(target_os = "emscripten", target_os = "unknown"))))]
+#[cfg(all(
+    feature = "libp2p-websocket",
+    not(any(target_os = "emscripten", target_os = "unknown"))
+))]
 #[doc(inline)]
 pub use libp2p_websocket as websocket;
 #[doc(inline)]
@@ -276,10 +282,13 @@ pub fn build_tcp_ws_secio_mplex_yamux(
         .and_then(move |output, endpoint| {
             let peer_id = output.remote_key.into_peer_id();
             let peer_id2 = peer_id.clone();
-            let upgrade = core::upgrade::SelectUpgrade::new(yamux::Config::default(), mplex::MplexConfig::new())
-                // TODO: use a single `.map` instead of two maps
-                .map_inbound(move |muxer| (peer_id, muxer))
-                .map_outbound(move |muxer| (peer_id2, muxer));
+            let upgrade = core::upgrade::SelectUpgrade::new(
+                yamux::Config::default(),
+                mplex::MplexConfig::new(),
+            )
+            // TODO: use a single `.map` instead of two maps
+            .map_inbound(move |muxer| (peer_id, muxer))
+            .map_outbound(move |muxer| (peer_id2, muxer));
             core::upgrade::apply(output.stream, upgrade, endpoint)
                 .map(|(id, muxer)| (id, core::muxing::StreamMuxerBox::new(muxer)))
         })
