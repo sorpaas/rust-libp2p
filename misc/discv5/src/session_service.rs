@@ -401,7 +401,7 @@ impl SessionService {
         })?;
 
         // update the enr record if we need need to
-        let updated_enr = if enr_seq < self.enr.seq {
+        let updated_enr = if enr_seq < self.enr.seq() {
             Some(self.enr.clone())
         } else {
             None

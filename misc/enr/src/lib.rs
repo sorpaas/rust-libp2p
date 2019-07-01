@@ -71,7 +71,7 @@ const MAX_ENR_SIZE: usize = 300;
 #[derive(Clone, PartialEq, Eq)]
 pub struct Enr {
     /// ENR sequence number.
-    pub seq: u64,
+    seq: u64,
 
     /// The `NodeId` of the ENR record.
     node_id: NodeId,
@@ -95,6 +95,11 @@ impl Enr {
     /// The libp2p PeerId for the record.
     pub fn node_id(&self) -> &NodeId {
         &self.node_id
+    }
+
+    /// The current sequence number of the ENR record.
+    pub fn seq(&self) -> u64 {
+        self.seq
     }
 
     /// Returns a list of multiaddrs if the ENR has an `ip` and either a `tcp` or `udp` key. The
@@ -233,6 +238,27 @@ impl Enr {
 
     // Setters //
 
+    /// Allows setting the sequence number to an arbitrary value.
+    pub fn set_seq(&mut self, seq: u64, keypair: &Keypair) -> Result<(), EnrError> {
+        self.seq = seq;
+
+        let enr_keypair = EnrKeypair::from(keypair.clone());
+        // construct compact signature
+        self.signature = enr_keypair
+            .sign(&self.rlp_content())
+            .map_err(|_| EnrError::SigningError)?;
+
+        // update the node id
+        self.node_id = NodeId::from(keypair.public());
+
+        // check the size of the record
+        if self.size() > MAX_ENR_SIZE {
+            return Err(EnrError::ExceedsMaxSize);
+        }
+
+        Ok(())
+    }
+
     /// Adds a key/value to the ENR record. A `Keypair` is required to re-sign the record once
     /// modified.
     pub fn add_key(
@@ -249,7 +275,10 @@ impl Enr {
         self.content
             .insert(public_key.clone().into(), public_key.encode());
         // increment the sequence number
-        self.seq += 1;
+        self.seq = self
+            .seq
+            .checked_add(1)
+            .ok_or_else(|| EnrError::SequenceNumberTooHigh)?;
 
         // construct compact signature
         self.signature = enr_keypair
@@ -303,7 +332,10 @@ impl Enr {
         self.content
             .insert(public_key.clone().into(), public_key.encode());
         // increment the sequence number
-        self.seq += 1;
+        self.seq = self
+            .seq
+            .checked_add(1)
+            .ok_or_else(|| EnrError::SequenceNumberTooHigh)?;
 
         // construct compact signature
         self.signature = enr_keypair
@@ -594,6 +626,7 @@ impl Decodable for Enr {
 #[derive(Clone, Debug)]
 pub enum EnrError {
     ExceedsMaxSize,
+    SequenceNumberTooHigh,
     SigningError,
 }
 

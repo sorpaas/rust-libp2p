@@ -219,12 +219,12 @@ impl<TSubstream> Discv5<TSubstream> {
                 // check if we need to update the known ENR
                 match self.kbuckets.entry(&node_id.clone().into()) {
                     kbucket::Entry::Present(ref mut entry, _) => {
-                        if entry.value().seq < enr_seq {
+                        if entry.value().seq() < enr_seq {
                             self.request_enr(&node_id, src);
                         }
                     }
                     kbucket::Entry::Pending(ref mut entry, _) => {
-                        if entry.value().seq < enr_seq {
+                        if entry.value().seq() < enr_seq {
                             self.request_enr(&node_id, src);
                         }
                     }
@@ -236,7 +236,7 @@ impl<TSubstream> Discv5<TSubstream> {
                 let response = rpc::ProtocolMessage {
                     id: rpc_id,
                     body: rpc::RpcType::Response(rpc::Response::Ping {
-                        enr_seq: self.local_enr().seq,
+                        enr_seq: self.local_enr().seq(),
                         ip: src.ip(),
                         port: src.port(),
                     }),
@@ -320,7 +320,7 @@ impl<TSubstream> Discv5<TSubstream> {
 
                     // check if we need to request a new ENR
                     if let Some(enr) = self.find_enr(&node_id) {
-                        if enr.seq < enr_seq {
+                        if enr.seq() < enr_seq {
                             // request an ENR update
                             debug!("Requesting an ENR update from node: {}", node_id);
                             let req = rpc::Request::FindNode { distance: 0 };
@@ -340,7 +340,7 @@ impl<TSubstream> Discv5<TSubstream> {
     /// Sends a PING request to a node.
     fn send_ping(&mut self, node_id: &NodeId) {
         let req = rpc::Request::Ping {
-            enr_seq: self.local_enr().seq,
+            enr_seq: self.local_enr().seq(),
         };
         self.send_rpc_request(&node_id, req, None);
     }
@@ -579,14 +579,14 @@ impl<TSubstream> Discv5<TSubstream> {
             let key = kbucket::Key::from(peer.node_id().clone());
             match self.kbuckets.entry(&key) {
                 kbucket::Entry::Present(mut entry, _) => {
-                    if entry.value().seq < peer.seq {
+                    if entry.value().seq() < peer.seq() {
                         trace!("Enr updated: {}", peer);
                         *entry.value() = peer.clone();
                         self.service.update_enr(peer);
                     }
                 }
                 kbucket::Entry::Pending(mut entry, _) => {
-                    if entry.value().seq < peer.seq {
+                    if entry.value().seq() < peer.seq() {
                         trace!("Enr updated: {}", peer);
                         *entry.value() = peer.clone();
                         self.service.update_enr(peer);
@@ -808,7 +808,7 @@ where
                             self.service.send_whoareyou(
                                 src,
                                 &src_id,
-                                known_enr.seq,
+                                known_enr.seq(),
                                 Some(known_enr.clone()),
                                 auth_tag,
                             );

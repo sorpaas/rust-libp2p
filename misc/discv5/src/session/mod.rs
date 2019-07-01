@@ -253,7 +253,7 @@ impl Session {
         if let Some(enr) = auth_response.updated_enr {
             if let Some(remote_enr) = &self.remote_enr {
                 // verify the enr-seq number
-                if remote_enr.seq < enr.seq {
+                if remote_enr.seq() < enr.seq() {
                     self.remote_enr = Some(enr.clone());
                 } // ignore ENR's that have a lower seq number
             } else {
@@ -307,7 +307,7 @@ impl Session {
 
     pub fn update_enr(&mut self, enr: Enr) -> bool {
         if let Some(remote_enr) = &self.remote_enr {
-            if remote_enr.seq < enr.seq {
+            if remote_enr.seq() < enr.seq() {
                 self.remote_enr = Some(enr);
                 // ENR has been updated. Check if the state can be promoted to trusted
                 return self.update_trusted();

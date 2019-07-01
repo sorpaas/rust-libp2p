@@ -63,7 +63,7 @@ fn simple_session_message() {
 
             match message {
                 SessionEvent::WhoAreYouRequest { src, auth_tag, .. } => {
-                    let seq = sender_enr.seq;
+                    let seq = sender_enr.seq();
                     let node_id = sender_enr.node_id();
                     receiver_service.send_whoareyou(
                         src,
@@ -148,7 +148,7 @@ fn multiple_messages() {
 
             match message {
                 SessionEvent::WhoAreYouRequest { src, auth_tag, .. } => {
-                    let seq = sender_enr.seq;
+                    let seq = sender_enr.seq();
                     let node_id = &sender_enr.node_id();
                     receiver_service.send_whoareyou(
                         src,
