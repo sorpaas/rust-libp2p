@@ -20,14 +20,14 @@ use crate::session_service::{SessionEvent, SessionService};
 use enr::{Enr, NodeId};
 use fnv::FnvHashMap;
 use futures::prelude::*;
-use libp2p_core::identity::Keypair;
-use libp2p_core::swarm::{
-    ConnectedPoint, NetworkBehaviour, NetworkBehaviourAction, PollParameters,
-};
+use libp2p_core::{identity::Keypair, ConnectedPoint};
 use libp2p_core::{
     multiaddr::{Multiaddr, Protocol},
-    protocols_handler::{DummyProtocolsHandler, ProtocolsHandler},
     PeerId,
+};
+use libp2p_swarm::{
+    protocols_handler::{DummyProtocolsHandler, ProtocolsHandler},
+    NetworkBehaviour, NetworkBehaviourAction, PollParameters,
 };
 use log::{debug, error, info, trace, warn};
 use smallvec::SmallVec;
