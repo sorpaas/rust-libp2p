@@ -5,8 +5,7 @@ use libp2p_core::upgrade::{InboundUpgrade, Negotiated, OutboundUpgrade};
 use libp2p_swarm::protocols_handler::{
     KeepAlive, ProtocolsHandler, ProtocolsHandlerEvent, ProtocolsHandlerUpgrErr, SubstreamProtocol,
 };
-
-use log::{error, trace, warn};
+use log::{error, trace};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::io;
