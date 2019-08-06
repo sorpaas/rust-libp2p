@@ -7,7 +7,7 @@ pub struct GossipsubConfig {
     /// The protocol id to negotiate this protocol.
     pub protocol_id: Cow<'static, [u8]>,
 
-    /// Overlay network parameters.
+    // Overlay network parameters.
     /// Number of heartbeats to keep in the `memcache`.
     pub history_length: usize,
 
@@ -16,8 +16,10 @@ pub struct GossipsubConfig {
 
     /// Target number of peers for the mesh network (D in the spec).
     pub mesh_n: usize,
+
     /// Minimum number of peers in mesh network before adding more (D_lo in the spec).
     pub mesh_n_low: usize,
+
     /// Maximum number of peers in mesh network before removing some (D_high in the spec).
     pub mesh_n_high: usize,
 
@@ -54,7 +56,7 @@ impl Default for GossipsubConfig {
             heartbeat_interval: Duration::from_secs(1),
             fanout_ttl: Duration::from_secs(60),
             max_transmit_size: 2048,
-            hash_topics: true,
+            hash_topics: false, // default compatibility with floodsub
         }
     }
 }
@@ -63,14 +65,18 @@ pub struct GossipsubConfigBuilder {
     /// The protocol id to negotiate this protocol.
     protocol_id: Cow<'static, [u8]>,
 
+    /// Number of heartbeats to keep in the `memcache`.
     history_length: usize,
+
     /// Number of past heartbeats to gossip about.
     history_gossip: usize,
 
     /// Target number of peers for the mesh network (D in the spec).
     mesh_n: usize,
+
     /// Minimum number of peers in mesh network before adding more (D_lo in the spec).
     mesh_n_low: usize,
+
     /// Maximum number of peers in mesh network before removing some (D_high in the spec).
     mesh_n_high: usize,
 
@@ -107,7 +113,7 @@ impl Default for GossipsubConfigBuilder {
             heartbeat_interval: Duration::from_secs(1),
             fanout_ttl: Duration::from_secs(60),
             max_transmit_size: 2048,
-            hash_topics: true,
+            hash_topics: false,
         }
     }
 }

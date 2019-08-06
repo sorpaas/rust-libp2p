@@ -11,16 +11,21 @@ pub struct TopicHash {
 }
 
 impl TopicHash {
-    pub fn from_raw(hash: String) -> TopicHash {
-        TopicHash { hash }
+    pub fn from_raw(hash: impl Into<String>) -> TopicHash {
+        TopicHash { hash: hash.into() }
     }
+
     pub fn into_string(self) -> String {
         self.hash
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.hash
     }
 }
 
 /// A gossipsub topic.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Topic {
     topic: String,
 }

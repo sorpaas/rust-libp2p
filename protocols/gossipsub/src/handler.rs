@@ -60,23 +60,6 @@ where
     Poisoned,
 }
 
-/*
-impl<TSubstream> SubstreamState<TSubstream>
-where
-    TSubstream: AsyncRead + AsyncWrite,
-{
-    /// Consumes this state and produces the substream.
-    fn into_substream(self) -> Framed<Negotiated<TSubstream>, GossipsubCodec> {
-        match self {
-            SubstreamState::WaitingInput(substream) => substream,
-            SubstreamState::PendingSend(substream, _) => substream,
-            SubstreamState::PendingFlush(substream) => substream,
-            SubstreamState::Closing(substream) => substream,
-        }
-    }
-}
-*/
-
 impl<TSubstream> GossipsubHandler<TSubstream>
 where
     TSubstream: AsyncRead + AsyncWrite,
@@ -163,7 +146,7 @@ where
             <Self::OutboundProtocol as OutboundUpgrade<Self::Substream>>::Error,
         >,
     ) {
-        // ignore upgrade errors for now.
+        // Ignore upgrade errors for now.
         // If a peer doesn't support this protocol, this will just ignore them, but not disconnect
         // them.
     }
