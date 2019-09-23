@@ -82,6 +82,8 @@ fn main() {
             Err(e) => panic!("Decoding ENR failed: {}", e),
         }
     }
+    let target_random_node_id = libp2p::enr::NodeId::random();
+    swarm.find_node(target_random_node_id);
 
     // construct a 30 second interval to search for new peers.
     let mut query_interval = tokio::timer::Interval::new_interval(Duration::from_secs(30));

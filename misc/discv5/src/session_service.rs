@@ -17,6 +17,7 @@
 //TODO: Document the Event structure and WHOAREYOU requests to the protocol layer.
 //TODO: Packets are now indexed by SocketAddr. WHOAREYOU requests can come from any host matching a
 // socket addr and can reset encrypted connections. Verify this is satisfactory.
+//TODO: Limit packets per node to avoid DOS/Spam.
 
 use super::packet::{AuthHeader, AuthResponse, AuthTag, Magic, Nonce, Packet, Tag, TAG_LENGTH};
 use super::service::Discv5Service;
@@ -94,6 +95,8 @@ impl SessionService {
             magic.copy_from_slice(&hasher.result());
             magic
         };
+
+        dbg!(hex::encode(enr.node_id().raw()));
 
         Ok(SessionService {
             events: VecDeque::new(),
@@ -175,6 +178,10 @@ impl SessionService {
                     .entry(dst_id.clone())
                     .or_insert_with(SmallVec::new);
                 msgs.push(message);
+
+                dbg!("sent tag");
+                dbg!(hex::encode(dst_id.raw()));
+                dbg!(hex::encode(self.tag(&dst_id)));
 
                 // need to establish a new session, send a random packet
                 let (session, packet) = Session::new_random(self.tag(&dst_id), dst_enr.clone());

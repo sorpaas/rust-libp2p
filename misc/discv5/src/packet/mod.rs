@@ -263,6 +263,9 @@ impl Packet {
             return Err(PacketError::TooSmall);
         }
 
+        dbg!(hex::encode(data));
+        dbg!(hex::encode(magic_data));
+
         // initially look for a WHOAREYOU packet
         if data.len() >= MAGIC_LENGTH && &data[0..MAGIC_LENGTH] == magic_data {
             return Packet::decode_whoareyou(data);
