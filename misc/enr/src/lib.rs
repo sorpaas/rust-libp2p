@@ -468,8 +468,8 @@ impl FromStr for Enr {
         }
         // support both enr prefix and not
         let mut decode_string = base64_string;
-        if &base64_string[..3] == "enr:" {
-            decode_string = &decode_string[0..3];
+        if &base64_string[..4] == "enr:" {
+            decode_string = &decode_string[4..];
         }
         let bytes = base64::decode_config(decode_string, base64::URL_SAFE)
             .map_err(|_| "Invalid base64 encoding")?;
@@ -759,8 +759,11 @@ mod tests {
         let expected_pubkey =
             hex::decode("03ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138")
                 .unwrap();
+        let expected_node_id =
+            hex::decode("a448f24c6d18e575453db13171562b71999873db5b286df957af199ec94617f7")
+                .unwrap();
 
-        let enr: Enr = Enr::from_str(text).unwrap();
+        let enr: Enr = text.parse::<Enr>().unwrap();
         let pubkey = match enr.public_key() {
             PublicKey::Secp256k1(key) => Some(key.encode()),
             _ => None,
@@ -775,6 +778,8 @@ mod tests {
         assert_eq!(enr.tcp6(), None);
         assert_eq!(enr.signature(), &signature[..]);
         assert_eq!(pubkey.unwrap().to_vec(), expected_pubkey);
+        assert_eq!(enr.node_id().raw().to_vec(), expected_node_id);
+
         assert!(enr.verify());
     }
 

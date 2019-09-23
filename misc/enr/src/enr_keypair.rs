@@ -98,7 +98,9 @@ impl EnrPublicKey {
         match &self.inner {
             PublicKey::Ed25519(pk) => pk.encode().to_vec(),
             PublicKey::Rsa(pk) => pk.encode_x509(),
-            PublicKey::Secp256k1(pk) => pk.encode_uncompressed().to_vec(),
+            // Note: The current libsecp256k1 library prefixes the uncompressed output with a byte
+            // indicating the type of output. We ignore it here
+            PublicKey::Secp256k1(pk) => pk.encode_uncompressed()[1..].to_vec(),
         }
     }
 }
