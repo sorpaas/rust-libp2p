@@ -1,15 +1,13 @@
 //! The `Session` struct handles the stages of creating and establishing a handshake with a
 //! peer.
 //!
-//! There are ways a Session gets initialised.
+//! There are two ways a Session can get initialised.
 //!
-//! - An message to an unknown peer is requested. In this case a RANDOM packet is sent to the peer.
-//! This session is created using the `new_random()` function.
+//! - An RPC request to an unknown peer is requested by the application. In this scenario, a RANDOM packet is sent to the unknown peer. This session is created using the `new_random()` function.
 //! - A message was received from an unknown peer and we start the `Session` by sending a
 //! WHOAREYOU message.
 //!
-//! A `Session` is responsible for generating,deriving and holding keys for sessions between
-//! peers.
+//! This `Session` module is responsible for generating, deriving and holding keys for sessions for known peers.
 
 use super::packet::{AuthHeader, AuthTag, Nonce, Packet, Tag, MAGIC_LENGTH};
 use crate::session_service::SESSION_TIMEOUT;
@@ -28,7 +26,7 @@ const WHOAREYOU_STRING: &str = "WHOAREYOU";
 const NONCE_STRING: &str = "discovery-id-nonce";
 
 /// Manages active handshakes and connections between nodes in discv5. There are three main states
-/// a session can be in, intializing (`WhoAreYouSent` or `RandomSent`), `Untrusted` (when the
+/// a session can be in, initializing (`WhoAreYouSent` or `RandomSent`), `Untrusted` (when the
 /// socket address of the ENR doesn't match the `last_seen_socket`) and `Established` (the session
 /// has been successfully established).
 pub struct Session {
@@ -91,6 +89,8 @@ pub enum SessionStatus {
 }
 
 impl Session {
+    /// Creates a new `Session` instance and generates a RANDOM packet to be sent along with this
+    /// session being established. This session is set to `RandomSent` state.
     pub fn new_random(tag: Tag, remote_enr: Enr) -> (Self, Packet) {
         let random_packet = Packet::random(tag);
 
@@ -106,8 +106,9 @@ impl Session {
         (session, random_packet)
     }
 
+    /// Creates a new `Session` and generates an associated WHOAREYOU packet. The returned session is in the
+    /// `WhoAreYouSent` state.
     pub fn new_whoareyou(
-        tag: Tag,
         node_id: &NodeId,
         enr_seq: u64,
         remote_enr: Option<Enr>,
@@ -127,7 +128,6 @@ impl Session {
             let id_nonce: Nonce = rand::random();
 
             Packet::WhoAreYou {
-                tag,
                 magic,
                 token: auth_tag,
                 id_nonce,
@@ -205,6 +205,7 @@ impl Session {
         let (auth_header, ciphertext) = crypto::encrypt_with_header(
             &self.keys.auth_resp_key,
             &self.keys.encryption_key,
+            id_nonce,
             auth_pt,
             message,
             &(self.ephem_pubkey.clone().expect("Keys have been generated")),
@@ -250,7 +251,7 @@ impl Session {
             crypto::decrypt_authentication_header(&auth_resp_key, auth_header, &tag)?;
 
         // check and verify a potential ENR update
-        if let Some(enr) = auth_response.updated_enr {
+        if let Some(enr) = auth_response.node_record {
             if let Some(remote_enr) = &self.remote_enr {
                 // verify the enr-seq number
                 if remote_enr.seq() < enr.seq() {

@@ -466,11 +466,12 @@ impl FromStr for Enr {
         if base64_string.len() < 4 {
             return Err("Invalid ENR string".to_string());
         }
-        let (prefix, base64_string) = base64_string.split_at(4);
-        if prefix != "enr:" {
-            return Err("String is not ENR prefixed".to_string());
+        // support both enr prefix and not
+        let mut decode_string = base64_string;
+        if &base64_string[..3] == "enr:" {
+            decode_string = &decode_string[0..3];
         }
-        let bytes = base64::decode_config(base64_string, base64::URL_SAFE)
+        let bytes = base64::decode_config(decode_string, base64::URL_SAFE)
             .map_err(|_| "Invalid base64 encoding")?;
         rlp::decode::<Enr>(&bytes).map_err(|e| format!("Invalid ENR: {:?}", e))
     }

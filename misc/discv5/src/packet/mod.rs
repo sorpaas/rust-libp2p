@@ -1,7 +1,6 @@
 //! This module defines the raw UDP message packets for Discovery v5.
 //!
-//! The [discv5 wire specification](https://github.com/ethereum/devp2p/blob/master/discv5/discv5.md) provides
-//! further information on UDP message packets as implemented in this module.
+//! The [discv5 wire specification](https://github.com/ethereum/devp2p/blob/master/discv5/discv5.md) provides further information on UDP message packets as implemented in this module.
 //!
 //! The `Packet` struct defines all raw UDP message variants and implements the encoding/decoding
 //! logic.
@@ -45,9 +44,6 @@ pub enum Packet {
     },
     /// Handshake packet to establish identities.
     WhoAreYou {
-        /// The XOR(SHA256(dest-node-id), src-node-id).
-        tag: Tag,
-
         /// SHA256(`dest-node-id` || "WHOAREYOU").
         magic: [u8; MAGIC_LENGTH],
 
@@ -106,6 +102,16 @@ impl Packet {
         }
     }
 
+    /// Returns true if the packet is a WHOAREYOU packet.
+    pub fn is_whoareyou(&self) -> bool {
+        match &self {
+            Packet::RandomPacket { .. } => false,
+            Packet::AuthMessage { .. } => false,
+            Packet::Message { .. } => false,
+            Packet::WhoAreYou { .. } => true,
+        }
+    }
+
     /// Encodes a packet to bytes.
     pub fn encode(&self) -> Vec<u8> {
         match self {
@@ -121,16 +127,13 @@ impl Packet {
                 buf
             }
             Packet::WhoAreYou {
-                tag,
                 magic,
                 token,
                 id_nonce,
                 enr_seq,
             } => {
-                let mut buf = Vec::with_capacity(
-                    TAG_LENGTH + MAGIC_LENGTH + AUTH_TAG_LENGTH + ID_NONCE_LENGTH + 8 + 2,
-                ); // + enr + rlp
-                buf.extend_from_slice(tag);
+                let mut buf =
+                    Vec::with_capacity(MAGIC_LENGTH + AUTH_TAG_LENGTH + ID_NONCE_LENGTH + 8 + 2); // + enr + rlp
                 buf.extend_from_slice(magic);
                 let list = rlp::encode_list::<Vec<u8>, Vec<u8>>(&[
                     token.to_vec(),
@@ -166,10 +169,10 @@ impl Packet {
     }
 
     /// Decodes a WHOAREYOU packet.
-    fn decode_whoareyou(tag: Tag, data: &[u8]) -> Result<Self, PacketError> {
-        // 32 tag + 32 magic + 32 token + 12 id + 2 enr + 1 rlp
+    fn decode_whoareyou(data: &[u8]) -> Result<Self, PacketError> {
+        // 32 magic + 32 token + 12 id + 2 enr + 1 rlp
         // decode the rlp list
-        let rlp_list = data[TAG_LENGTH + MAGIC_LENGTH..].to_vec();
+        let rlp_list = data[MAGIC_LENGTH..].to_vec();
         let rlp = rlp::Rlp::new(&rlp_list);
         let mut decoded_list = match rlp.as_list::<Vec<u8>>() {
             Ok(v) => v,
@@ -180,7 +183,7 @@ impl Packet {
         };
         // build objects
         let mut magic: [u8; MAGIC_LENGTH] = Default::default();
-        magic.clone_from_slice(&data[TAG_LENGTH..TAG_LENGTH + MAGIC_LENGTH]);
+        magic.clone_from_slice(&data[0..MAGIC_LENGTH]);
 
         if decoded_list.len() != 3 {
             debug!(
@@ -207,7 +210,6 @@ impl Packet {
         token.clone_from_slice(&token_bytes);
 
         Ok(Packet::WhoAreYou {
-            tag,
             magic,
             token,
             id_nonce,
@@ -261,14 +263,9 @@ impl Packet {
             return Err(PacketError::TooSmall);
         }
 
-        let mut tag: [u8; TAG_LENGTH] = Default::default();
-        tag.clone_from_slice(&data[0..TAG_LENGTH]);
-
         // initially look for a WHOAREYOU packet
-        if data.len() >= TAG_LENGTH + MAGIC_LENGTH
-            && &data[TAG_LENGTH..TAG_LENGTH + MAGIC_LENGTH] == magic_data
-        {
-            return Packet::decode_whoareyou(tag, data);
+        if data.len() >= MAGIC_LENGTH && &data[0..MAGIC_LENGTH] == magic_data {
+            return Packet::decode_whoareyou(data);
         }
         // not a WHOAREYOU packet
 
@@ -277,9 +274,14 @@ impl Packet {
             // 8c in hex - rlp encoded bytes of length 12 -i.e rlp_bytes(auth_tag)
             // we have either a random-packet or standard message
             // return the encrypted standard message.
+            let mut tag: [u8; TAG_LENGTH] = Default::default();
+            tag.clone_from_slice(&data[0..TAG_LENGTH]);
             return Packet::decode_standard_message(tag, data);
         }
         // not a Random Packet or standard message, may be a message with authentication header
+        let mut tag: [u8; TAG_LENGTH] = Default::default();
+        tag.clone_from_slice(&data[0..TAG_LENGTH]);
+
         let rlp = rlp::Rlp::new(&data[TAG_LENGTH..]);
         if rlp.is_list() {
             // potentially authentication header
@@ -324,7 +326,7 @@ mod tests {
     use libp2p_core::identity::Keypair;
     use rand;
     use sha2::{Digest, Sha256};
-    //    use simple_logger;
+    use simple_logger;
 
     fn hash256_to_fixed_array(s: &'static str) -> [u8; 32] {
         let mut hasher = Sha256::new();
@@ -336,7 +338,7 @@ mod tests {
 
     #[test]
     fn encode_decode_random_packet() {
-        //        let _ = simple_logger::init_with_level(log::Level::Debug);
+        let _ = simple_logger::init_with_level(log::Level::Debug);
         let tag = hash256_to_fixed_array("test-tag");
         let auth_tag: [u8; AUTH_TAG_LENGTH] = rand::random();
         let random_magic: Magic = rand::random();
@@ -361,15 +363,13 @@ mod tests {
 
     #[test]
     fn encode_decode_whoareyou_packet() {
-        //        let _ = simple_logger::init_with_level(log::Level::Debug);
-        let tag = hash256_to_fixed_array("88484"); // has 2 0 leading bytes.
+        let _ = simple_logger::init_with_level(log::Level::Debug);
         let magic = hash256_to_fixed_array("magic");
         let id_nonce: [u8; ID_NONCE_LENGTH] = rand::random();
         let token: [u8; AUTH_TAG_LENGTH] = rand::random();
         let enr_seq: u64 = rand::random();
 
         let packet = Packet::WhoAreYou {
-            tag,
             magic,
             token,
             id_nonce,
@@ -384,11 +384,13 @@ mod tests {
 
     #[test]
     fn encode_decode_auth_packet() {
-        //        let _ = simple_logger::init_with_level(log::Level::Debug);
+        let _ = simple_logger::init_with_level(log::Level::Debug);
         let tag = hash256_to_fixed_array("test-tag");
+        let magic = hash256_to_fixed_array("test-magic");
 
         // auth header data
         let auth_tag: [u8; AUTH_TAG_LENGTH] = rand::random();
+        let id_nonce: [u8; ID_NONCE_LENGTH] = rand::random();
         let ephemeral_pubkey = Keypair::generate_secp256k1()
             .public()
             .into_protobuf_encoding();
@@ -396,8 +398,9 @@ mod tests {
         let auth_response = auth_response.to_vec();
 
         let auth_header = AuthHeader {
+            id_nonce,
             auth_tag,
-            auth_scheme_name: "gsm",
+            auth_scheme_name: "gcm",
             ephemeral_pubkey,
             auth_response,
         };
@@ -412,7 +415,7 @@ mod tests {
         };
 
         let encoded_packet = packet.clone().encode();
-        let decoded_packet = Packet::decode(&encoded_packet, &tag).unwrap();
+        let decoded_packet = Packet::decode(&encoded_packet, &magic).unwrap();
 
         assert_eq!(decoded_packet, packet);
     }

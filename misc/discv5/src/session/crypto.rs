@@ -19,7 +19,7 @@ const NODE_ID_LENGTH: usize = 32;
 const INFO_LENGTH: usize = 26 + 2 * NODE_ID_LENGTH;
 const KEY_LENGTH: usize = 16;
 const KEY_AGREEMENT_STRING: &str = "discovery v5 key agreement";
-const KNOWN_SCHEME: &str = "gsm";
+const KNOWN_SCHEME: &str = "gcm";
 
 type Key = [u8; KEY_LENGTH];
 
@@ -207,6 +207,7 @@ pub fn decrypt_message(
 pub fn encrypt_with_header(
     auth_resp_key: &Key,
     encryption_key: &Key,
+    id_nonce: &Nonce,
     auth_pt: &[u8],
     message: &[u8],
     ephem_pubkey: &[u8],
@@ -216,7 +217,12 @@ pub fn encrypt_with_header(
 
     // get the rlp_encoded auth_header
     let auth_tag: [u8; 12] = rand::random();
-    let auth_header = AuthHeader::new(auth_tag, ephem_pubkey.to_vec(), ciphertext);
+    let auth_header = AuthHeader::new(
+        auth_tag,
+        id_nonce.clone(),
+        ephem_pubkey.to_vec(),
+        ciphertext,
+    );
 
     let mut auth_data = tag.to_vec();
     auth_data.append(&mut auth_header.encode());

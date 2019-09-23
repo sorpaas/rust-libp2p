@@ -7,8 +7,9 @@ use libp2p_core::{
     muxing::StreamMuxerBox,
     nodes::Substream,
     transport::{boxed::Boxed, MemoryTransport},
-    upgrade, PeerId, Swarm, Transport,
+    upgrade, PeerId, Transport,
 };
+use libp2p_swarm::Swarm;
 use tokio::prelude::*;
 
 use crate::kbucket;
