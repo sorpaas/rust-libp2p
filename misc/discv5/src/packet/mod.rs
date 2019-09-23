@@ -12,7 +12,7 @@ mod auth_header;
 pub use auth_header::AuthHeader;
 pub use auth_header::AuthResponse;
 use log::debug;
-use rlp::Decodable;
+use rlp::{Decodable, RlpStream};
 use std::default::Default;
 
 pub const TAG_LENGTH: usize = 32;
@@ -135,11 +135,14 @@ impl Packet {
                 let mut buf =
                     Vec::with_capacity(MAGIC_LENGTH + AUTH_TAG_LENGTH + ID_NONCE_LENGTH + 8 + 2); // + enr + rlp
                 buf.extend_from_slice(magic);
-                let list = rlp::encode_list::<Vec<u8>, Vec<u8>>(&[
-                    token.to_vec(),
-                    id_nonce.to_vec(),
-                    enr_seq.to_be_bytes().to_vec(),
-                ]);
+                let list = {
+                    let mut s = RlpStream::new();
+                    s.begin_list(3);
+                    s.append(&token.to_vec());
+                    s.append(&id_nonce.to_vec());
+                    s.append(enr_seq);
+                    s.drain()
+                };
                 buf.extend_from_slice(&list);
                 buf
             }
@@ -262,9 +265,6 @@ impl Packet {
             debug!("Packet length too small. Length: {}", data.len());
             return Err(PacketError::TooSmall);
         }
-
-        dbg!(hex::encode(data));
-        dbg!(hex::encode(magic_data));
 
         // initially look for a WHOAREYOU packet
         if data.len() >= MAGIC_LENGTH && &data[0..MAGIC_LENGTH] == magic_data {

@@ -784,6 +784,29 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_test_vector_2() {
+        let secret_key = libp2p_core::identity::secp256k1::SecretKey::from_bytes(
+            hex::decode("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+                .unwrap(),
+        )
+        .unwrap();
+
+        let key = Keypair::Secp256k1(libp2p_core::identity::secp256k1::Keypair::from(secret_key));
+
+        let id = "v4";
+        let ip = Ipv4Addr::new(127, 0, 0, 1);
+        let udp = 30303;
+
+        let enr = {
+            let mut builder = EnrBuilder::new();
+            builder.id(id);
+            builder.ip(ip.into());
+            builder.udp(udp);
+            builder.build(&key).unwrap()
+        };
+    }
+
+    #[test]
     fn test_encode_decode_secp256k1() {
         let key = Keypair::generate_secp256k1();
 

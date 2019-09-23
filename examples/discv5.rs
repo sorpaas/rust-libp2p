@@ -55,6 +55,7 @@ fn main() {
     let keypair = identity::Keypair::generate_secp256k1();
     // construct a local ENR
     let enr = libp2p::enr::EnrBuilder::new()
+        .id("v4")
         .ip(address.into())
         .udp(port)
         .build(&keypair)

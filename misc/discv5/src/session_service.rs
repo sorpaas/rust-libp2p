@@ -96,8 +96,6 @@ impl SessionService {
             magic
         };
 
-        dbg!(hex::encode(enr.node_id().raw()));
-
         Ok(SessionService {
             events: VecDeque::new(),
             enr,
@@ -178,10 +176,6 @@ impl SessionService {
                     .entry(dst_id.clone())
                     .or_insert_with(SmallVec::new);
                 msgs.push(message);
-
-                dbg!("sent tag");
-                dbg!(hex::encode(dst_id.raw()));
-                dbg!(hex::encode(self.tag(&dst_id)));
 
                 // need to establish a new session, send a random packet
                 let (session, packet) = Session::new_random(self.tag(&dst_id), dst_enr.clone());
