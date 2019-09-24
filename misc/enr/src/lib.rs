@@ -1,17 +1,19 @@
 //! # Ethereum Node Record (ENR)
 //!
-//! This crate contains an implementation of an Ethereum Node Record (ENR) as specified by [EIP-778](https://eips.ethereum.org/EIPS/eip-778) extended to allow for the use of a range of public key types.
+//! This crate contains an implementation of an Ethereum Node Record (ENR) as specified by
+//! [EIP-778](https://eips.ethereum.org/EIPS/eip-778) extended to allow for the use of a range of
+//! public key types.
 //!
 //! An ENR is a signed, key-value record which as an associated `NodeId` (a 32-byte identifier).
-//! Updating/modifying an ENR requires a libp2p [`Keypair`] in order to re-sign the record with
-//! the associated key-pair. This implementation builds uses [`EnrKeypair`] as a wrapper around
-//! the libp2p [`Keypair`] in order to perform ENR-specific sign/verify functions.
+//! Updating/modifying an ENR requires a libp2p [`Keypair`] in order to re-sign the record with the
+//! associated key-pair. This implementation builds uses [`EnrKeypair`] as a wrapper around the
+//! libp2p [`Keypair`] in order to perform ENR-specific sign/verify functions.
 //!
 //! ENR's are identified by their sequence number. When updating an ENR, the sequence number is
 //! increased.
 //!
-//! This implementation also keeps the `rlp_encoding` of it's content, to ensure the ordering of the
-//! keys when encoded/decoded.
+//! Different identity schemes can be used to define the node id and signatures. Currently only the
+//! "v4" identity is supported and is set by default.
 //!
 //! # Example
 //!
@@ -26,12 +28,11 @@
 //!
 //! let key = Keypair::generate_secp256k1();
 //! let ip = Ipv4Addr::new(192,168,0,1);
-//! let enr = EnrBuilder::new().ip(ip.into()).tcp(8000).id("v5").build(&key).unwrap();
+//! let enr = EnrBuilder::new("v4").ip(ip.into()).tcp(8000).build(&key).unwrap();
 //!
-//! assert_eq!(enr.multiaddr()[0],
-//!     "/ip4/192.168.0.1/tcp/8000".parse().unwrap());
+//! assert_eq!(enr.multiaddr()[0], "/ip4/192.168.0.1/tcp/8000".parse().unwrap());
 //! assert_eq!(enr.ip(), Some("192.168.0.1".parse().unwrap()));
-//! assert_eq!(enr.id(), Some(String::from("v5")));
+//! assert_eq!(enr.id(), Some("v4".into()));
 //! ```
 //!
 //! [`Keypair`]: libp2p_core::identity::Keypair
@@ -267,7 +268,12 @@ impl Enr {
     /// Verify the signature of the ENR record.
     pub fn verify(&self) -> bool {
         let enr_pubkey = EnrPublicKey::from(self.public_key());
-        return enr_pubkey.verify(&self.rlp_content(), &self.signature);
+        match self.id() {
+            Some(ref id) if id == "v4" => {
+                enr_pubkey.verify_v4(&self.rlp_content(), &self.signature)
+            }
+            _ => unimplemented!(),
+        }
     }
 
     /// RLP encodes the ENR into a byte array.
@@ -296,10 +302,9 @@ impl Enr {
         self.seq = seq;
 
         let enr_keypair = EnrKeypair::from(keypair.clone());
-        // construct compact signature
-        self.signature = enr_keypair
-            .sign(&self.rlp_content())
-            .map_err(|_| EnrError::SigningError)?;
+
+        // sign the record
+        self.sign(enr_keypair)?;
 
         // update the node id
         self.node_id = NodeId::from(keypair.public());
@@ -320,6 +325,11 @@ impl Enr {
         value: Vec<u8>,
         keypair: &Keypair,
     ) -> Result<bool, EnrError> {
+        // currently only support "v4" identity schemes
+        if key == "id" && value != b"v4" {
+            return Err(EnrError::UnsupportedIdentityScheme);
+        }
+
         self.content.insert(key.into(), value);
         // add the new public key
         // convert the libp2p keypair into an EnrKeypair
@@ -333,10 +343,8 @@ impl Enr {
             .checked_add(1)
             .ok_or_else(|| EnrError::SequenceNumberTooHigh)?;
 
-        // construct compact signature
-        self.signature = enr_keypair
-            .sign(&self.rlp_content())
-            .map_err(|_| EnrError::SigningError)?;
+        // sign the record
+        self.sign(enr_keypair)?;
 
         // update the node id
         self.node_id = NodeId::from(keypair.public());
@@ -401,10 +409,8 @@ impl Enr {
             .checked_add(1)
             .ok_or_else(|| EnrError::SequenceNumberTooHigh)?;
 
-        // construct compact signature
-        self.signature = enr_keypair
-            .sign(&self.rlp_content())
-            .map_err(|_| EnrError::SigningError)?;
+        // sign the record
+        self.sign(enr_keypair)?;
 
         // update the node id
         self.node_id = NodeId::from(keypair.public());
@@ -435,6 +441,19 @@ impl Enr {
             stream.append(v);
         }
         stream.drain()
+    }
+
+    /// Signs the ENR record based on the identity scheme. Currently only "v4" is supported.
+    fn sign(&mut self, enr_keypair: EnrKeypair) -> Result<(), EnrError> {
+        self.signature = {
+            match self.id() {
+                Some(ref id) if id == "v4" => enr_keypair
+                    .sign_v4(&self.rlp_content())
+                    .map_err(|_| EnrError::SigningError)?,
+                _ => unimplemented!(),
+            }
+        };
+        Ok(())
     }
 }
 
@@ -498,8 +517,12 @@ impl<'de> Deserialize<'de> for Enr {
     }
 }
 
-/// This is the builder struct for generating ENR records.
+/// This is the builder struct for generating ENR records. Note this currently only supports the
+/// v4 identity scheme.
 pub struct EnrBuilder {
+    /// The identity scheme used to build the ENR record.
+    id: String,
+
     /// The starting sequence number for the ENR record.
     seq: u64,
 
@@ -509,8 +532,11 @@ pub struct EnrBuilder {
 
 impl EnrBuilder {
     /// Constructs a minimal `EnrBuilder` providing only a sequence number.
-    pub fn new() -> Self {
+    /// Currently only supports the id v4 scheme and therefore disallows creation of any other
+    /// scheme.
+    pub fn new(id: impl Into<String>) -> Self {
         EnrBuilder {
+            id: id.into(),
             seq: 1,
             content: BTreeMap::new(),
         }
@@ -543,11 +569,16 @@ impl EnrBuilder {
         self
     }
 
+    /*
+     * Removed from the builder as only the v4 scheme is currently supported.
+     * This is set as default in the builder.
+
     /// Adds an `Id` field to the `ENRBuilder`.
     pub fn id(&mut self, id: &str) -> &mut Self {
         self.content.insert("id".into(), id.as_bytes().to_vec());
         self
     }
+    */
 
     /// Adds a `tcp` field to the `ENRBuilder`.
     pub fn tcp(&mut self, tcp: u16) -> &mut Self {
@@ -589,6 +620,16 @@ impl EnrBuilder {
         stream.drain()
     }
 
+    /// Signs record based on the identity scheme. Currently only "v4" is supported.
+    fn signature(&self, enr_keypair: EnrKeypair) -> Result<Vec<u8>, EnrError> {
+        match self.id.as_str() {
+            "v4" => enr_keypair
+                .sign_v4(&self.rlp_content())
+                .map_err(|_| EnrError::SigningError),
+            _ => unimplemented!(),
+        }
+    }
+
     /// Adds a public key to the ENR builder.
     fn add_public_key(&mut self, key: &EnrPublicKey) {
         self.add_value(key.clone().into(), key.encode());
@@ -596,14 +637,19 @@ impl EnrBuilder {
 
     /// Constructs an ENR from the ENRBuilder struct.
     pub fn build(&mut self, key: &Keypair) -> Result<Enr, EnrError> {
+        // add the identity scheme to the content
+        if self.id != "v4" {
+            return Err(EnrError::UnsupportedIdentityScheme);
+        }
+
+        self.content
+            .insert("id".into(), self.id.as_bytes().to_vec());
+
         let enr_key = EnrKeypair::from(key.clone());
         self.add_public_key(&enr_key.public());
         let rlp_content = self.rlp_content();
 
-        // construct compact signature
-        let signature = enr_key
-            .sign(&rlp_content)
-            .map_err(|_| EnrError::SigningError)?;
+        let signature = self.signature(enr_key)?;
 
         // check the size of the record
         if rlp_content.len() + signature.len() + 8 > MAX_ENR_SIZE {
@@ -721,6 +767,7 @@ pub enum EnrError {
     ExceedsMaxSize,
     SequenceNumberTooHigh,
     SigningError,
+    UnsupportedIdentityScheme,
 }
 
 #[cfg(test)]
@@ -791,32 +838,30 @@ mod tests {
         )
         .unwrap();
 
-        let key = Keypair::Secp256k1(libp2p_core::identity::secp256k1::Keypair::from(secret_key));
+        let signature = hex::decode("7098ad865b00a582051940cb9cf36836572411a47278783077011599ed5cd16b76f2635f4e234738f30813a89eb9137e3e3df5266e3a1f11df72ecf1145ccb9c").unwrap();
 
-        let id = "v4";
+        let key = Keypair::Secp256k1(libp2p_core::identity::secp256k1::Keypair::from(secret_key));
         let ip = Ipv4Addr::new(127, 0, 0, 1);
         let udp = 30303;
 
         let enr = {
-            let mut builder = EnrBuilder::new();
-            builder.id(id);
+            let mut builder = EnrBuilder::new("v4");
             builder.ip(ip.into());
             builder.udp(udp);
             builder.build(&key).unwrap()
         };
+
+        assert_eq!(enr.signature(), &signature[..]);
     }
 
     #[test]
     fn test_encode_decode_secp256k1() {
         let key = Keypair::generate_secp256k1();
-
-        let id = "v5";
         let ip = Ipv4Addr::new(127, 0, 0, 1);
         let tcp = 3000;
 
         let enr = {
-            let mut builder = EnrBuilder::new();
-            builder.id(id);
+            let mut builder = EnrBuilder::new("v4");
             builder.ip(ip.into());
             builder.tcp(tcp);
             builder.build(&key).unwrap()
@@ -826,7 +871,7 @@ mod tests {
 
         let decoded_enr = rlp::decode::<Enr>(&encoded_enr).unwrap();
 
-        assert_eq!(decoded_enr.id(), Some(id.into()));
+        assert_eq!(decoded_enr.id(), Some("v4".into()));
         assert_eq!(decoded_enr.ip(), Some(ip.into()));
         assert_eq!(decoded_enr.tcp(), Some(tcp));
         // Must compare encoding as the public key itself can be different
@@ -840,14 +885,11 @@ mod tests {
     #[test]
     fn test_encode_decode_ed25519() {
         let key = Keypair::generate_ed25519();
-
-        let id = "v5";
         let ip = Ipv4Addr::new(10, 0, 0, 1);
         let tcp = 30303;
 
         let enr = {
-            let mut builder = EnrBuilder::new();
-            builder.id(id);
+            let mut builder = EnrBuilder::new("v4");
             builder.ip(ip.into());
             builder.tcp(tcp);
             builder.build(&key).unwrap()
@@ -856,7 +898,7 @@ mod tests {
         let encoded_enr = rlp::encode(&enr);
         let decoded_enr = rlp::decode::<Enr>(&encoded_enr).unwrap();
 
-        assert_eq!(decoded_enr.id(), Some(id.into()));
+        assert_eq!(decoded_enr.id(), Some("v4".into()));
         assert_eq!(decoded_enr.ip(), Some(ip.into()));
         assert_eq!(decoded_enr.tcp(), Some(tcp));
         assert_eq!(decoded_enr.public_key(), key.public());
@@ -866,13 +908,11 @@ mod tests {
     #[test]
     fn test_add_key() {
         let key = Keypair::generate_secp256k1();
-        let id = "v5";
         let ip = Ipv4Addr::new(10, 0, 0, 1);
         let tcp = 30303;
 
         let mut enr = {
-            let mut builder = EnrBuilder::new();
-            builder.id(id);
+            let mut builder = EnrBuilder::new("v4");
             builder.ip(ip.into());
             builder.tcp(tcp);
             builder.build(&key).unwrap()
@@ -885,19 +925,17 @@ mod tests {
     #[test]
     fn test_set_ip() {
         let key = Keypair::generate_secp256k1();
-        let id = "v5";
         let tcp = 30303;
         let ip = Ipv4Addr::new(10, 0, 0, 1);
 
         let mut enr = {
-            let mut builder = EnrBuilder::new();
-            builder.id(id);
+            let mut builder = EnrBuilder::new("v4");
             builder.tcp(tcp);
             builder.build(&key).unwrap()
         };
 
         assert!(enr.set_ip(ip.into(), &key).unwrap());
-        assert_eq!(enr.id(), Some(id.into()));
+        assert_eq!(enr.id(), Some("v4".into()));
         assert_eq!(enr.ip(), Some(ip.into()));
         assert_eq!(enr.tcp(), Some(tcp));
         assert!(enr.verify());
@@ -917,7 +955,7 @@ mod tests {
         let ip = Ipv4Addr::new(10, 0, 0, 1);
 
         let enr = {
-            let mut builder = EnrBuilder::new();
+            let mut builder = EnrBuilder::new("v4");
             builder.ip(ip.into());
             builder.tcp(tcp);
             builder.udp(udp);
@@ -942,7 +980,7 @@ mod tests {
         let ip = Ipv4Addr::new(10, 0, 0, 1);
 
         let mut enr = {
-            let mut builder = EnrBuilder::new();
+            let mut builder = EnrBuilder::new("v4");
             builder.ip(ip.into());
             builder.tcp(tcp);
             builder.udp(udp);

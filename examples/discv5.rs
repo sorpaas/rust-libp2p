@@ -12,7 +12,9 @@
 //! A single instance listening on a udp socket `0.0.0.0:9000` (with an ENR IP address of
 //! 127.0.0.1) can be created via:
 //!
-//! ```sh cargo run --example discv5 ```
+//! ```
+//! sh cargo run --example discv5
+//! ```
 //!
 //! This will display the created ENR record for the node.
 //!
@@ -20,7 +22,9 @@
 //! passed as command line options. Therefore, a second instance, in a new terminal, can be run on
 //! port 9001 and connected to the first via:
 //!
-//! ```sh cargo run --example discv5 -- 127.0.0.1 9001 <Base64-ENR> ```
+//! ```
+//! sh cargo run --example discv5 -- 127.0.0.1 9001 <Base64-ENR>
+//! ```
 //!
 //! where `<Base64-ENR>` is the base64 ENR given from executing the first node. These steps can be
 //! repeated to add further nodes to the network.
@@ -51,11 +55,19 @@ fn main() {
         }
     };
 
-    // generate a key for the node
-    let keypair = identity::Keypair::generate_secp256k1();
+    // use a fixed key
+    let raw_key = vec![
+        183, 28, 113, 166, 126, 17, 119, 173, 78, 144, 22, 149, 225, 180, 185, 238, 23, 174, 22,
+        198, 102, 141, 49, 62, 172, 47, 150, 219, 205, 163, 242, 145,
+    ];
+    let secret_key = identity::secp256k1::SecretKey::from_bytes(raw_key).unwrap();
+    let keypair = identity::Keypair::Secp256k1(identity::secp256k1::Keypair::from(secret_key));
+
+    // uncomment to generate a new key each run.
+    //let keypair = identity::Keypair::generate_secp256k1();
+
     // construct a local ENR
-    let enr = libp2p::enr::EnrBuilder::new()
-        .id("v4")
+    let enr = libp2p::enr::EnrBuilder::new("v4")
         .ip(address.into())
         .udp(port)
         .build(&keypair)

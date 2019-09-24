@@ -18,9 +18,9 @@ impl From<Keypair> for EnrKeypair {
 }
 
 impl EnrKeypair {
-    /// Perform  the ENR-specific signing.
+    /// Performs ENR-specific signing for the v4 identity scheme.
     // This can be modified as support for more keys are given.
-    pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, SigningError> {
+    pub fn sign_v4(&self, msg: &[u8]) -> Result<Vec<u8>, SigningError> {
         match self.inner {
             Keypair::Ed25519(ref keypair) => Ok(keypair.sign(msg)),
             Keypair::Rsa(ref pair) => pair.sign(msg).map_err(|e| e.into()),
@@ -68,8 +68,8 @@ impl Into<String> for EnrPublicKey {
 }
 
 impl EnrPublicKey {
-    /// Verify a raw message, given a public key.
-    pub fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
+    /// Verify a raw message, given a public key for the v4 identity scheme.
+    pub fn verify_v4(&self, msg: &[u8], sig: &[u8]) -> bool {
         // take the keccak hash
         match &self.inner {
             PublicKey::Ed25519(pk) => pk.verify(&msg, sig),
