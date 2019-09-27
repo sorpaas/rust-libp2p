@@ -10,7 +10,7 @@
 //! This `Session` module is responsible for generating, deriving and holding keys for sessions for known peers.
 
 use super::packet::{AuthHeader, AuthTag, Nonce, Packet, Tag, MAGIC_LENGTH};
-use crate::session_service::SESSION_TIMEOUT;
+use crate::session_service::{SESSION_TIMEOUT, SESSION_ESTABLISH_TIMEOUT};
 use crate::Discv5Error;
 use enr::{Enr, NodeId};
 use libp2p_core::identity::Keypair;
@@ -19,11 +19,12 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::timer::Delay;
 use zeroize::Zeroize;
+use log::debug;
+
 
 mod crypto;
 
 const WHOAREYOU_STRING: &str = "WHOAREYOU";
-const NONCE_STRING: &str = "discovery-id-nonce";
 
 /// Manages active handshakes and connections between nodes in discv5. There are three main states
 /// a session can be in, initializing (`WhoAreYouSent` or `RandomSent`), `Untrusted` (when the
@@ -31,25 +32,23 @@ const NONCE_STRING: &str = "discovery-id-nonce";
 /// has been successfully established).
 pub struct Session {
     /// The current state of the Session
-    status: SessionStatus,
+    state: SessionState,
+
+    /// Whether the last seen socket address of the peer matches its known ENR. If it does not, the
+    /// session is considered untrusted, and outgoing messages are not sent.
+    trusted: TrustedState,
 
     /// The ENR of the remote node. This may be unknown during `WhoAreYouSent` states.
     remote_enr: Option<Enr>,
-
-    /// The ephemeral public key of the session.
-    ephem_pubkey: Option<Vec<u8>>,
-
-    /// The established session keys.
-    keys: Keys,
 
     /// Last seen IP address and port. This is used to determine if the session is trusted or not.
     last_seen_socket: SocketAddr,
 
     /// The Delay when this session expires.
-    timeout: Option<Delay>,
+    timeout: Delay,
 }
 
-#[derive(Zeroize)]
+#[derive(Zeroize, PartialEq)]
 pub struct Keys {
     /// The Authentication response key.
     pub auth_resp_key: [u8; 16],
@@ -61,45 +60,62 @@ pub struct Keys {
     pub decryption_key: [u8; 16],
 }
 
-impl Keys {
-    pub fn new() -> Self {
-        Keys {
-            auth_resp_key: [0u8; 16],
-            encryption_key: [0u8; 16],
-            decryption_key: [0u8; 16],
-        }
-    }
+/// A State
+pub enum TrustedState {
+    /// The ENR socket address matches what is observed
+    Trusted,
+    /// The source socket address of the last message doesn't match the known ENR. In this state, the service will respond to requests, but does not treat the node as
+    /// connected until the IP is updated to match the source IP.
+    Untrusted,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum SessionStatus {
+#[derive(PartialEq)]
+/// The current state of the session. This enum holds the encryption keys for various states.
+pub enum SessionState {
     /// A WHOAREYOU packet has been sent, and the Session is awaiting an Authentication response.
     WhoAreYouSent,
 
     /// A RANDOM packet has been sent and the Session is awaiting a WHOAREYOU response.
     RandomSent,
+    
+    /// An AuthMessage has been sent with a new set of generated keys. Once a response has been
+    /// received that we can decrypt, the session transitions to an established state, replacing
+    /// any current set of keys. No Session is currently active.
+    AwaitingResponse(Keys),
 
-    /// A Session has been established, but the IP address of the remote ENR does not match the IP
-    /// of the source. In this state, the service will respond to requests, but does not treat the node as
-    /// connected until the IP is updated to match the source IP.
-    Untrusted,
+    /// An established Session has received a WHOAREYOU. In this state, messages are sent
+    /// out with the established sessions keys and new encrypted messages are first attempted to
+    /// be decrypted with the established session keys, upon failure, the new keys are tried. If
+    /// the new keys are successful, the session keys are updated and the state progresses to
+    /// `Established`.
+    EstablishedAwaitingResponse {
+        /// The keys used in the current established session.
+        current_keys: Keys,
+        /// New keys generated from a recent WHOARYOU request.
+        new_keys: Keys,
+    },
 
     /// A Session has been established and the ENR IP matches the source IP.
-    Established,
+    Established(Keys),
+
+    /// Processing has failed. Fatal error.
+    Poisoned
 }
 
 impl Session {
+
+    /* Session Generation Functions */
+
     /// Creates a new `Session` instance and generates a RANDOM packet to be sent along with this
     /// session being established. This session is set to `RandomSent` state.
     pub fn new_random(tag: Tag, remote_enr: Enr) -> (Self, Packet) {
         let random_packet = Packet::random(tag);
 
         let session = Session {
-            status: SessionStatus::RandomSent,
+            state: SessionState::RandomSent,
+            trusted: TrustedState::Untrusted,
             remote_enr: Some(remote_enr),
-            ephem_pubkey: None,
-            keys: Keys::new(),
-            timeout: None, // don't timeout until the session is established
+            timeout: Delay::new(Instant::now() + Duration::from_secs(SESSION_ESTABLISH_TIMEOUT)), 
             last_seen_socket: "0.0.0.0:0".parse::<SocketAddr>().expect("Valid Socket"),
         };
 
@@ -136,101 +152,23 @@ impl Session {
         };
 
         let session = Session {
-            status: SessionStatus::WhoAreYouSent,
+            state: SessionState::WhoAreYouSent,
+            trusted: TrustedState::Untrusted,
             remote_enr,
-            ephem_pubkey: None,
-            keys: Keys::new(),
-            timeout: None, // don't timeout until the session is established
+            timeout: Delay::new(Instant::now() + Duration::from_secs(SESSION_ESTABLISH_TIMEOUT)), 
             last_seen_socket: "0.0.0.0:0".parse::<SocketAddr>().expect("Valid Socket"),
         };
 
         (session, whoareyou_packet)
     }
 
-    fn generate_keys(
-        &mut self,
-        local_node_id: &NodeId,
-        id_nonce: &Nonce,
-    ) -> Result<(), Discv5Error> {
-        let (encryption_key, decryption_key, auth_resp_key, ephem_pubkey) =
-            crypto::generate_session_keys(
-                local_node_id,
-                self.remote_enr
-                    .as_ref()
-                    .expect("Should never be None at this point"),
-                id_nonce,
-            )?;
+    /* Update Session State Functions */
 
-        self.ephem_pubkey = Some(ephem_pubkey);
-
-        self.keys = Keys {
-            encryption_key,
-            auth_resp_key,
-            decryption_key,
-        };
-
-        self.timeout = Some(Delay::new(
-            Instant::now() + Duration::from_secs(SESSION_TIMEOUT),
-        ));
-
-        self.status = SessionStatus::Established;
-        Ok(())
-    }
-
-    pub fn encrypt_message(&self, tag: Tag, message: &[u8]) -> Result<Packet, Discv5Error> {
-        //TODO: Establish a counter to prevent repeats of nonce
-        let auth_tag: AuthTag = rand::random();
-
-        let cipher = crypto::encrypt_message(&self.keys.encryption_key, auth_tag, message, &tag)?;
-
-        Ok(Packet::Message {
-            tag,
-            auth_tag,
-            message: cipher,
-        })
-    }
-
-    pub fn encrypt_with_header(
-        &mut self,
-        tag: Tag,
-        local_node_id: &NodeId,
-        id_nonce: &Nonce,
-        auth_pt: &[u8],
-        message: &[u8],
-    ) -> Result<Packet, Discv5Error> {
-        // generate the session keys
-        self.generate_keys(local_node_id, id_nonce)?;
-
-        // encrypt the message with the newly generated session keys
-        let (auth_header, ciphertext) = crypto::encrypt_with_header(
-            &self.keys.auth_resp_key,
-            &self.keys.encryption_key,
-            id_nonce,
-            auth_pt,
-            message,
-            &(self.ephem_pubkey.clone().expect("Keys have been generated")),
-            &tag,
-        )?;
-
-        Ok(Packet::AuthMessage {
-            tag,
-            auth_header,
-            message: ciphertext,
-        })
-    }
-
-    pub fn generate_nonce(id_nonce: Nonce) -> Vec<u8> {
-        let mut nonce = NONCE_STRING.as_bytes().to_vec();
-        nonce.append(&mut id_nonce.to_vec());
-        nonce
-    }
-
-    /// Generates a session from an authentication header. If the IP of the ENR does not match the
+    /// Generates session keys from an authentication header. If the IP of the ENR does not match the
     /// source IP address, we consider this session untrusted. The output returns a boolean which
     /// specifies if the Session is trusted or not.
     pub fn establish_from_header(
         &mut self,
-        tag: Tag,
         local_keypair: &Keypair,
         local_id: &NodeId,
         remote_id: &NodeId,
@@ -248,7 +186,7 @@ impl Session {
 
         // decrypt the authentication header
         let auth_response =
-            crypto::decrypt_authentication_header(&auth_resp_key, auth_header, &tag)?;
+            crypto::decrypt_authentication_header(&auth_resp_key, auth_header)?;
 
         // check and verify a potential ENR update
         if let Some(enr) = auth_response.node_record {
@@ -266,7 +204,7 @@ impl Session {
             return Err(Discv5Error::InvalidEnr);
         }
 
-        // enr must exist here
+        // ENR must exist here
         let remote_public_key = self
             .remote_enr
             .as_ref()
@@ -275,36 +213,163 @@ impl Session {
         // verify the auth header nonce
         if !crypto::verify_authentication_nonce(
             &remote_public_key,
-            &Session::generate_nonce(id_nonce),
+            &id_nonce,
             &auth_response.signature,
         ) {
             return Err(Discv5Error::InvalidSignature);
         }
 
-        // session has been established
-        self.ephem_pubkey = Some(auth_header.ephemeral_pubkey.clone());
-        self.keys = Keys {
+        let keys = Keys {
             encryption_key,
             auth_resp_key,
             decryption_key,
         };
-        self.timeout = Some(Delay::new(
-            Instant::now() + Duration::from_secs(SESSION_TIMEOUT),
-        ));
 
-        self.status = SessionStatus::Untrusted;
+        // session has been established
+        self.state = SessionState::Established(keys);
+
+        // update the timeout
+        self.timeout = Delay::new(
+            Instant::now() + Duration::from_secs(SESSION_TIMEOUT),
+        );
+
         // output if the session is trusted or untrusted
         Ok(self.update_trusted())
     }
 
+    /* Encryption Related Functions */
+
+    /// Encrypts a message and produces an AuthMessage.
+    pub fn encrypt_with_header(
+        &mut self,
+        tag: Tag,
+        local_node_id: &NodeId,
+        id_nonce: &Nonce,
+        auth_pt: &[u8],
+        message: &[u8],
+    ) -> Result<Packet, Discv5Error> {
+
+        // generate the session keys
+        let (encryption_key, decryption_key, auth_resp_key, ephem_pubkey) =
+            crypto::generate_session_keys(
+                local_node_id,
+                self.remote_enr
+                    .as_ref()
+                    .expect("Should never be None at this point"),
+                id_nonce,
+            )?;
+
+        let keys = Keys {
+            encryption_key,
+            auth_resp_key,
+            decryption_key,
+        };
+
+        // encrypt the message with the newly generated session keys
+        let (auth_header, ciphertext) = crypto::encrypt_with_header(
+            &keys.auth_resp_key,
+            &keys.encryption_key,
+            id_nonce,
+            auth_pt,
+            message,
+            &ephem_pubkey,
+            &tag,
+        )?;
+
+        // update the session state
+        match std::mem::replace(&mut self.state, SessionState::Poisoned) {
+        SessionState::Established(current_keys) => self.state = SessionState::EstablishedAwaitingResponse{ current_keys, new_keys: keys},
+        SessionState::Poisoned => panic!(),
+        _=> self.state = SessionState::AwaitingResponse(keys),
+        }
+
+        Ok(Packet::AuthMessage {
+            tag,
+            auth_header,
+            message: ciphertext,
+        })
+    }
+
+    /// Uses the current `Session` to encrypt a message. Encrypt packets with the current session
+    /// key if we are awaiting a response from AuthMessage.
+    pub fn encrypt_message(&self, tag: Tag, message: &[u8]) -> Result<Packet, Discv5Error> {
+
+        //TODO: Establish a counter to prevent repeats of nonce
+        let auth_tag: AuthTag = rand::random();
+
+        let cipher = match &self.state {
+            SessionState::Established(keys) => crypto::encrypt_message(&keys.encryption_key, auth_tag, message, &tag)?,
+            SessionState::EstablishedAwaitingResponse {current_keys, ..} => crypto::encrypt_message(&current_keys.encryption_key, auth_tag, message, &tag)?,
+            _ => return Err(Discv5Error::SessionNotEstablished),
+        };
+
+        Ok(Packet::Message {
+            tag,
+            auth_tag,
+            message: cipher,
+        })
+    }
+
+    /* Decryption Related Functions */
+
+    /// Decrypts an encrypted message. If a Session is already established, the original decryption
+    /// keys are tried first, upon failure, the new keys are attempted. If the new keys succeed,
+    /// the session keys are updated along with the Session state.
     pub fn decrypt_message(
-        &self,
+        &mut self,
         nonce: AuthTag,
         message: &[u8],
         aad: &[u8],
     ) -> Result<Vec<u8>, Discv5Error> {
-        crypto::decrypt_message(&self.keys.decryption_key, nonce, message, aad)
+
+        let node_id = self.remote_enr.as_ref().expect("ENR must exist").node_id();
+        match std::mem::replace(&mut self.state, SessionState::Poisoned) {
+            SessionState::Established(keys) => {
+                let result = crypto::decrypt_message(&keys.decryption_key, nonce, message, aad);
+                self.state = SessionState::Established(keys);
+                result
+            },
+            SessionState::EstablishedAwaitingResponse { current_keys, new_keys } => { 
+                // try the original keys first
+                let message_result = crypto::decrypt_message(&current_keys.decryption_key, nonce, message, aad);
+                if message_result.is_ok() {
+                    // The request for a new session is invalid, throw it away
+                    self.state = SessionState::Established(current_keys);
+                    message_result
+                }
+                else {
+                    debug!("Old session key failed to decrypt message");
+                    // try decrypt with the new keys
+                    let new_key_result = crypto::decrypt_message(&new_keys.decryption_key, nonce, message, aad);
+                    if new_key_result.is_ok() {
+                        debug!("Session keys have been updated for node: {}", node_id);
+                        self.state = SessionState::Established(new_keys);
+                    }
+                    new_key_result
+                }
+            },
+            SessionState::AwaitingResponse(keys) => {
+                    let message_result = crypto::decrypt_message(&keys.decryption_key, nonce, message, aad);
+                    if message_result.is_ok() {
+                        self.state = SessionState::Established(keys);
+                    }
+                    else {
+                        self.state = SessionState::AwaitingResponse(keys);
+                    }
+                    message_result
+            }
+            SessionState::Poisoned => panic!(),
+            _ => return Err(Discv5Error::SessionNotEstablished)
+        }
+
     }
+
+    /// Builds the signature for a given nonce.
+    pub fn sign_nonce(keypair: &Keypair, id_nonce: &Nonce) -> Result<Vec<u8>, Discv5Error> {
+        crypto::sign_nonce(keypair, id_nonce)
+    }
+
+    /* Session Helper Functions */
 
     pub fn update_enr(&mut self, enr: Enr) -> bool {
         if let Some(remote_enr) = &self.remote_enr {
@@ -321,37 +386,46 @@ impl Session {
     /// demoted to an `untrusted` state. This value returns true if the Session has been
     /// promoted.
     pub fn update_trusted(&mut self) -> bool {
-        if let SessionStatus::Untrusted = self.status {
+        if let TrustedState::Untrusted = self.trusted {
             if let Some(remote_enr) = &self.remote_enr {
                 if Some(self.last_seen_socket) == remote_enr.udp_socket() {
-                    self.status = SessionStatus::Established;
+                    self.trusted = TrustedState::Trusted;
                     return true;
                 }
             }
-        } else if let SessionStatus::Established = self.status {
+        } else if let TrustedState::Trusted = self.trusted {
             if let Some(remote_enr) = &self.remote_enr {
                 if Some(self.last_seen_socket) != remote_enr.udp_socket() {
-                    self.status = SessionStatus::Untrusted;
+                    self.trusted = TrustedState::Untrusted;
                 }
             }
         }
         false
     }
 
+    /// The socket address of the last packer received from this node.
     pub fn set_last_seen_socket(&mut self, socket: SocketAddr) {
         self.last_seen_socket = socket;
     }
 
     pub fn increment_timeout(&mut self, secs: u64) {
-        self.timeout = Some(Delay::new(Instant::now() + Duration::from_secs(secs)));
+        self.timeout = Delay::new(Instant::now() + Duration::from_secs(secs));
     }
 
-    pub fn timeout(&mut self) -> &mut Option<Delay> {
+    pub fn timeout(&mut self) -> &mut Delay {
         &mut self.timeout
     }
 
-    pub fn status(&self) -> SessionStatus {
-        self.status
+    pub fn is_whoareyou_sent(&self) -> bool {
+        SessionState::WhoAreYouSent == self.state
+    }
+
+    pub fn is_random_sent(&self) -> bool {
+        SessionState::RandomSent == self.state
+    }
+
+    pub fn is_awaiting_response(&self) -> bool {
+        if let SessionState::AwaitingResponse(_) = self.state { true } else { false }
     }
 
     pub fn remote_enr(&self) -> &Option<Enr> {
@@ -359,19 +433,25 @@ impl Session {
     }
 
     pub fn is_trusted(&self) -> bool {
-        if let SessionStatus::Established = self.status {
+        if let TrustedState::Trusted = self.trusted {
             true
         } else {
             false
         }
     }
 
-    pub fn established(&self) -> bool {
-        match self.status {
-            SessionStatus::WhoAreYouSent => false,
-            SessionStatus::RandomSent => false,
-            SessionStatus::Established => true,
-            SessionStatus::Untrusted => true,
-        }
+    /// Returns true if the Session is trusted and has established session keys. This state means
+    /// the session is capable of sending requests.
+    pub fn trusted_established(&self) -> bool {
+        let established = match &self.state {
+            SessionState::WhoAreYouSent => false,
+            SessionState::RandomSent => false,
+            SessionState::AwaitingResponse(_) => false,
+            SessionState::Established(_) => true,
+            SessionState::EstablishedAwaitingResponse{..} => true,
+            SessionState::Poisoned => unreachable!(),
+        };
+
+        self.is_trusted() && established
     }
 }

@@ -12,7 +12,7 @@ mod auth_header;
 pub use auth_header::AuthHeader;
 pub use auth_header::AuthResponse;
 use log::debug;
-use rlp::{Decodable, RlpStream};
+use rlp::{Decodable, DecoderError, RlpStream};
 use std::default::Default;
 
 pub const TAG_LENGTH: usize = 32;
@@ -244,8 +244,7 @@ impl Packet {
     /// Decodes a message that contains an authentication header.
     fn decode_auth_header(tag: Tag, data: &[u8], rlp_length: usize) -> Result<Self, PacketError> {
         let auth_header_rlp = rlp::Rlp::new(&data[TAG_LENGTH..TAG_LENGTH + rlp_length]);
-        let auth_header =
-            AuthHeader::decode(&auth_header_rlp).map_err(|_| PacketError::UnknownFormat)?;
+        let auth_header = AuthHeader::decode(&auth_header_rlp)?;
 
         let message_start = TAG_LENGTH + rlp_length;
         let message = data[message_start..].to_vec();
@@ -319,8 +318,15 @@ fn u64_from_be_vec(data: &[u8]) -> Result<u64, PacketError> {
 pub enum PacketError {
     UnknownFormat,
     UnknownPacket,
+    DecodingError(DecoderError),
     TooSmall,
     InvalidByteSize,
+}
+
+impl From<DecoderError> for PacketError {
+    fn from(err: DecoderError) -> PacketError {
+        PacketError::DecodingError(err)
+    }
 }
 
 #[cfg(test)]

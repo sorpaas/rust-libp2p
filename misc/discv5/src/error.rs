@@ -1,3 +1,5 @@
+use rlp::DecoderError;
+
 #[derive(Debug)]
 pub enum Discv5Error {
     InvalidEnr,
@@ -7,8 +9,9 @@ pub enum Discv5Error {
     InvalidRemotePublicKey,
     InvalidSecretKey,
     InvalidSignature,
+    SessionNotEstablished,
+    RLPError(DecoderError),
     EncryptionFail(String),
     DecryptionFail(String),
     Custom(&'static str),
-    SessionNotEstablished,
 }

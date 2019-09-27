@@ -29,9 +29,9 @@ impl EnrKeypair {
                 let hash = Keccak256::digest(msg);
                 let der_sig = pair.secret().sign_hash(&hash)?;
                 // convert to compact form
-                Ok(Signature::from_der(&der_sig)
+                Ok(Signature::parse_der(&der_sig)
                     .map_err(|_| SigningError::new(String::from("Incorrect DER format")))?
-                    .serialize_compact()
+                    .serialize()
                     .to_vec())
             }
         }
@@ -77,8 +77,8 @@ impl EnrPublicKey {
             PublicKey::Secp256k1(pk) => {
                 // convert a compact encoded signature to a 256 bit DER-encoded signature
                 let msg = Keccak256::digest(msg);
-                if let Ok(sig) = Signature::from_compact(sig).and_then(|s| Ok(s.serialize_der())) {
-                    return pk.verify_hash(&msg, &sig);
+                if let Ok(sig) = Signature::parse_slice(sig).map(|s| s.serialize_der()) {
+                    return pk.verify_hash(&msg, sig.as_ref());
                 }
                 false
             }

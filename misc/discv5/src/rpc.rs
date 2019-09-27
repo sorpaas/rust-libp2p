@@ -490,17 +490,17 @@ mod tests {
     #[test]
     fn encode_decode_nodes_response() {
         let kp = Keypair::generate_ed25519();
-        let enr1 = EnrBuilder::new()
+        let enr1 = EnrBuilder::new("v4")
             .ip("127.0.0.1".parse().unwrap())
             .udp(500)
             .build(&kp)
             .unwrap();
-        let enr2 = EnrBuilder::new()
+        let enr2 = EnrBuilder::new("v4")
             .ip("10.0.0.1".parse().unwrap())
             .tcp(8080)
             .build(&kp)
             .unwrap();
-        let enr3 = EnrBuilder::new()
+        let enr3 = EnrBuilder::new("v4")
             .ip("10.4.5.6".parse().unwrap())
             .build(&kp)
             .unwrap();

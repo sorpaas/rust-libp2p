@@ -14,16 +14,15 @@
 //! to match the source, the `Session` is promoted to an established state. RPC requests are not sent
 //! to untrusted Sessions, only responses.
 //!
-//TODO: Document the Event structure and WHOAREYOU requests to the protocol layer.
-//TODO: Packets are now indexed by SocketAddr. WHOAREYOU requests can come from any host matching a
-// socket addr and can reset encrypted connections. Verify this is satisfactory.
+//TODO: Document the event structure and WHOAREYOU requests to the protocol layer.
 //TODO: Limit packets per node to avoid DOS/Spam.
+//TODO: Update the Session and request timeouts to a DelayQueue.
 
 use super::packet::{AuthHeader, AuthResponse, AuthTag, Magic, Nonce, Packet, Tag, TAG_LENGTH};
 use super::service::Discv5Service;
 use crate::error::Discv5Error;
 use crate::rpc::ProtocolMessage;
-use crate::session::{Session, SessionStatus};
+use crate::session::Session;
 use enr::{Enr, NodeId};
 use fnv::FnvHashMap;
 use futures::prelude::*;
@@ -47,6 +46,8 @@ const REQUEST_RETRIES: u8 = 2;
 /// The timeout for a Session.
 //TODO: Make this a function of messages sent, to prevent nonce replay
 pub const SESSION_TIMEOUT: u64 = 86400;
+/// The number of seconds a session will wait to be established before being removed.
+pub const SESSION_ESTABLISH_TIMEOUT: u64 = 30;
 
 pub struct SessionService {
     /// Queue of events produced by the session service.
@@ -76,6 +77,8 @@ pub struct SessionService {
 }
 
 impl SessionService {
+    /* Public Functions */
+
     /// A new Session service which instantiates the UDP socket.
     pub fn new(enr: Enr, keypair: Keypair, ip: IpAddr) -> io::Result<Self> {
         // ensure the keypair matches the one that signed the enr.
@@ -133,7 +136,7 @@ impl SessionService {
         }
     }
 
-    /// Sends a ProtocolMessage request to a known ENR. It is possible to send requests to IP
+    /// Sends a `ProtocolMessage` request to a known ENR. It is possible to send requests to IP
     /// addresses not related to the ENR.
     // To update an ENR for an unknown node, we request a FINDNODE with distance 0 to the IP
     // address that we know of.
@@ -154,7 +157,7 @@ impl SessionService {
         })?;
 
         let session = match self.sessions.get(dst_id) {
-            Some(s) if s.established() => s,
+            Some(s) if s.trusted_established() => s,
             Some(_) => {
                 // we are currently establishing a connection, add to pending messages
                 debug!("Awaiting a session to established, caching message");
@@ -187,8 +190,8 @@ impl SessionService {
             }
         };
 
-        // session is established,
-        // only send to trusted sessions
+        // a session exists,
+        // only send to trusted sessions (the ip's match the ENR)
         if !session.is_trusted() {
             debug!(
                 "Tried to send a request to an untrusted node, ignoring. Node: {}",
@@ -268,7 +271,6 @@ impl SessionService {
 
     /// This is called in response to a SessionMessage::WhoAreYou event. The protocol finds the
     /// highest known ENR then calls this function to send a WHOAREYOU packet.
-    //TODO: Create a more elegant API
     pub fn send_whoareyou(
         &mut self,
         dst: SocketAddr,
@@ -279,7 +281,7 @@ impl SessionService {
     ) {
         // If a WHOAREYOU is already sent or a session is already established, ignore this request.
         match self.sessions.get(node_id) {
-            Some(s) if s.established() || s.status() == SessionStatus::WhoAreYouSent => {
+            Some(s) if s.trusted_established() || s.is_whoareyou_sent()  => {
                 warn!("Session exists. WhoAreYou packet not sent");
                 return;
             }
@@ -292,6 +294,8 @@ impl SessionService {
         let request = Request::new(node_id.clone(), packet, None);
         self.process_request(dst, request);
     }
+
+    /* Internal Private Functions */
 
     /// Calculates the src `NodeId` given a tag.
     fn src_id(&self, tag: &Tag) -> NodeId {
@@ -321,7 +325,7 @@ impl SessionService {
         id_nonce: Nonce,
         enr_seq: u64,
     ) -> Result<(), ()> {
-        // It must come from a source that we have an outgoing message to and match on an
+        // It must come from a source that we have an outgoing message to and match an
         // authentication tag
         let req = {
             if let Some(known_reqs) = self.pending_requests.get_mut(&src) {
@@ -350,7 +354,7 @@ impl SessionService {
         let src_id = req.dst_id;
         let tag = self.tag(&src_id);
 
-        // find the session associated with this WHOAREYOU
+        // Find the session associated with this WHOAREYOU
         let session = self.sessions.get_mut(&src_id).ok_or_else(|| {
             warn!("Received a WHOAREYOU packet without having an established session.")
         })?;
@@ -367,6 +371,8 @@ impl SessionService {
                     .ok_or_else(|| error!("No pending messages found for WHOAREYOU request."))?;
 
                 if messages.is_empty() {
+                    // This could happen for an established connection and another peer (from the
+                    // the same socketaddr) sends a WHOAREYOU packet
                     debug!("No pending messages found for WHOAREYOU request.");
                     return Err(());
                 }
@@ -379,29 +385,28 @@ impl SessionService {
             }
         };
 
-        // update the session
+        // Update the session (this must be the socket that we sent the referenced request to)
         session.set_last_seen_socket(src);
 
-        // sign the nonce
-        let nonce = Session::generate_nonce(id_nonce);
-        let sig = self.keypair.sign(&nonce).map_err(|e| {
+        // Build a nonce signature
+        let sig =  Session::sign_nonce(&self.keypair, &id_nonce).map_err(|e| {
             error!(
                 "Error signing WHOAREYOU Nonce. Ignoring  WHOAREYOU packet. Error: {:?}",
                 e
             )
         })?;
 
-        // update the enr record if we need need to
+        // Update the ENR record if necessary
         let updated_enr = if enr_seq < self.enr.seq() {
             Some(self.enr.clone())
         } else {
             None
         };
 
-        // generate the auth response to be encrypted
+        // Generate the auth response to be encrypted
         let auth_pt = AuthResponse::new(&sig, updated_enr).encode();
 
-        // generate session keys and encrypt the earliest packet with the authentication header
+        // Generate session keys and encrypt the earliest packet with the authentication header
         let auth_packet = match session.encrypt_with_header(
             tag,
             &self.enr.node_id(),
@@ -421,19 +426,13 @@ impl SessionService {
             }
         };
 
-        // session has been established, notify the protocol
-        self.events.push_back(SessionEvent::Established(
-            session
-                .remote_enr()
-                .clone()
-                .expect("ENR exists when awaiting a WHOAREYOU"),
-        ));
-        // send the response
+
+        // Send the response
         let request = Request::new(src_id.clone(), auth_packet, Some(message));
         debug!("Sending Authentication response to node: {}", src_id);
         self.process_request(src, request);
 
-        // flush the message cache
+        // Flush the message cache
         let _ = self.flush_messages(src, &src_id);
         Ok(())
     }
@@ -457,7 +456,7 @@ impl SessionService {
         })?;
 
         // check that this session is awaiting a response for a WHOAREYOU message
-        if session.status() != SessionStatus::WhoAreYouSent {
+        if !session.is_whoareyou_sent() {
             warn!("Received an authenticated header without a known WHOAREYOU session. Dropping");
             return Err(());
         }
@@ -489,7 +488,6 @@ impl SessionService {
 
         // establish the session
         match session.establish_from_header(
-            tag,
             &self.keypair,
             &self.enr.node_id(),
             &src_id,
@@ -506,6 +504,9 @@ impl SessionService {
                         .clone()
                         .expect("ENR exists when awaiting a WHOAREYOU"),
                 ));
+                // flush messages awaiting an established session
+                let _ = self.flush_messages(src, &src_id);
+
             }
             Ok(false) => {} // untrusted session, do not notify the protocol
             Err(e) => {
@@ -522,11 +523,9 @@ impl SessionService {
         // decrypt the message
         let mut aad = tag.to_vec();
         aad.append(&mut auth_header.encode());
-        // log and continue on error
+        // continue on error
         let _ = self.handle_message(src, src_id.clone(), auth_header.auth_tag, message, &aad);
 
-        // flush messages awaiting a session
-        let _ = self.flush_messages(src, &src_id);
         Ok(())
     }
 
@@ -539,7 +538,7 @@ impl SessionService {
         message: &[u8],
         aad: &[u8],
     ) -> Result<(), ()> {
-        // check if we have an established session
+        // check if we have an available session
         let session = match self.sessions.get_mut(&src_id) {
             Some(s) => s,
             None => {
@@ -558,46 +557,34 @@ impl SessionService {
         };
 
         // if we have sent a random packet, upgrade to a WhoAreYou request
-        if !session.established() {
-            if session.status() == SessionStatus::RandomSent {
+        if session.is_random_sent() {
                 let event = SessionEvent::WhoAreYouRequest {
                     src,
                     src_id: src_id.clone(),
                     auth_tag,
                 };
                 self.events.push_back(event);
-            } else {
+        }
+        // return if we are awaiting a WhoAreYou packet
+        else if session.is_whoareyou_sent() {
                 debug!("Waiting for a session to be generated.");
                 // potentially store and decrypt once we receive the packet.
                 // drop it for now.
-            }
             return Ok(());
         }
 
-        // we have a known session,
-        // update the last_seen_socket and check if we need to promote the session to established
-        session.set_last_seen_socket(src);
-        if session.update_trusted() {
-            trace!("Session has been updated to ESTABLISHED. Node: {}", src_id);
-            // session has been established, notify the protocol
-            self.events.push_back(SessionEvent::Established(
-                session.remote_enr().clone().expect("ENR exists"),
-            ));
-        }
 
-        // decrypt and process the message
+        // we could be in the AwaitingResponse state. If so, this message could establish a new
+        // session with a node. We keep track to see if the decryption updates the session. If so,
+        // we notify the user and flush all cached messages.
+        let session_was_awaiting = session.is_awaiting_response();
+
+        // attempt to decrypt and process the message. 
         let message = match session.decrypt_message(auth_tag, message, aad) {
             Ok(m) => ProtocolMessage::decode(m)
                 .map_err(|e| warn!("Failed to decode message. Error: {:?}", e))?,
             Err(e) => {
-                debug!("Message from node: {} is not encrypted with known session keys. Requesting WHOAREYOU packet. Error: {:?}", src_id, e);
-                // spawn a WHOAREYOU event to check for highest known ENR
-                let event = SessionEvent::WhoAreYouRequest {
-                    src,
-                    src_id: src_id.clone(),
-                    auth_tag,
-                };
-                self.events.push_back(event);
+                debug!("Message from node: {} is not encrypted with known session keys. Dropping packet. Error: {:?}", src_id, e);
                 return Err(());
             }
         };
@@ -617,11 +604,30 @@ impl SessionService {
         // we have received a new message. Notify the behaviour.
         trace!("Message received: {} from: {}", message, src_id);
         let event = SessionEvent::Message {
-            src_id,
+            src_id: src_id.clone(),
             src,
             message: Box::new(message),
         };
         self.events.push_back(event);
+
+        // update the last_seen_socket and check if we need to promote the session to trusted 
+        session.set_last_seen_socket(src);
+
+        // There are two possibilities a session could have been established. The latest message
+        // matches the known ENR and upgrades the session to an established state, or, we were
+        // awaiting a message to be decrypted with new session keys, this just arrived and we now
+        // consider the session established. In both cases, we notify the user and flush the cached
+        // messages.
+        if (session.update_trusted() && session.trusted_established()) | (session.trusted_established() && session_was_awaiting )
+        {
+            trace!("Session has been updated to ESTABLISHED. Node: {}", src_id);
+            // session has been established, notify the protocol
+            self.events.push_back(SessionEvent::Established(
+                session.remote_enr().clone().expect("ENR exists"),
+            ));
+            let _ = self.flush_messages(src, &src_id);
+        }
+
         Ok(())
     }
 
@@ -629,11 +635,10 @@ impl SessionService {
     #[inline]
     fn flush_messages(&mut self, dst: SocketAddr, dst_id: &NodeId) -> Result<(), ()> {
         let mut requests_to_send = Vec::new();
-
         {
             // get the session for this id
             let session = match self.sessions.get(dst_id) {
-                Some(s) if s.established() => s,
+                Some(s) if s.trusted_established() => s,
                 _ => {
                     // no session
                     return Err(());
@@ -745,8 +750,7 @@ impl SessionService {
         // for a given node id.
         let pending_requests_ref = &self.pending_requests;
         self.sessions.retain(|node_id, session| {
-            if let Some(timeout) = session.timeout() {
-                match timeout.poll() {
+                match session.timeout().poll() {
                     Ok(Async::Ready(_)) => {
                         // only remove a session if there are no pending requests.
                         let outgoing_req = pending_requests_ref.iter().find(|(_dst, reqs)| {
@@ -763,9 +767,6 @@ impl SessionService {
                     }
                     Ok(Async::NotReady) => (true),
                     Err(_) => (false),
-                }
-            } else {
-                true
             }
         });
     }

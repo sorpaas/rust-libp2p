@@ -36,7 +36,7 @@ fn build_swarms(n: usize) -> Vec<SwarmType> {
 
     for port in base_port..base_port + n as u16 {
         let keypair = identity::Keypair::generate_secp256k1();
-        let enr = EnrBuilder::new()
+        let enr = EnrBuilder::new("v4")
             .ip(ip.clone().into())
             .udp(port)
             .build(&keypair)

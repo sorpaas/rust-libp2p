@@ -1,7 +1,6 @@
 ///! The Authentication header associated with Discv5 Packets.
 use super::{AuthTag, Nonce, AUTH_TAG_LENGTH, ID_NONCE_LENGTH};
 use enr::Enr;
-// use libp2p_core::identity::PublicKey;
 use log::debug;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 
@@ -15,6 +14,7 @@ pub struct AuthHeader {
     /// Authentication nonce.
     pub auth_tag: AuthTag,
 
+    /// The nonce of the associated WHOAREYOU packet.
     pub id_nonce: Nonce,
 
     /// The authentication scheme.
@@ -85,7 +85,13 @@ impl Encodable for AuthResponse {
         s.begin_list(3);
         s.append(&self.version);
         s.append(&self.signature.to_vec());
-        s.append(&self.node_record);
+        // requires custom encoding. None is encoded as rlp []
+        if let Some(node_record) = &self.node_record {
+            s.append(node_record);
+        }
+        else {
+            s.begin_list(0);
+        }
     }
 }
 
@@ -97,7 +103,15 @@ impl Decodable for AuthResponse {
 
         let version = rlp.val_at::<u8>(0)?;
         let signature = rlp.val_at::<Vec<u8>>(1)?;
-        let node_record = rlp.val_at::<Option<Enr>>(2)?;
+        let node_record_rlp = rlp.at(2)?;
+        let node_record = {
+            if node_record_rlp.is_empty() {
+                None
+            }
+            else {
+                Some(node_record_rlp.as_val::<Enr>()?)
+            }
+        };
 
         Ok(AuthResponse {
             version,
@@ -111,8 +125,9 @@ impl Encodable for AuthHeader {
     fn rlp_append(&self, s: &mut RlpStream) {
         s.begin_list(5);
         s.append(&self.auth_tag.to_vec());
-        s.append(&self.id_nonce.to_vec());
+        // TODO: Note scheme and nonce are reversed to match the go spec
         s.append(&self.auth_scheme_name);
+        s.append(&self.id_nonce.to_vec());
         s.append(&self.ephemeral_pubkey.clone());
         s.append(&self.auth_response.to_vec());
     }
@@ -149,10 +164,11 @@ impl Decodable for AuthHeader {
         let pubkey_bytes = decoded_list
             .pop()
             .ok_or_else(|| DecoderError::RlpExpectedToBeData)?;
-        let auth_scheme_bytes = decoded_list
+        //TODO: Note scheme and nonce are swapped to match the go impl
+        let id_nonce_bytes = decoded_list
             .pop()
             .ok_or_else(|| DecoderError::RlpExpectedToBeData)?;
-        let id_nonce_bytes = decoded_list
+        let auth_scheme_bytes = decoded_list
             .pop()
             .ok_or_else(|| DecoderError::RlpExpectedToBeData)?;
         let auth_tag_bytes = decoded_list
@@ -160,17 +176,16 @@ impl Decodable for AuthHeader {
             .ok_or_else(|| DecoderError::RlpExpectedToBeData)?;
 
         let mut auth_tag: AuthTag = Default::default();
-        if auth_tag_bytes.len() != AUTH_TAG_LENGTH {
+        if auth_tag_bytes.len() > AUTH_TAG_LENGTH {
             return Err(DecoderError::Custom("Invalid Authtag length"));
         }
-        auth_tag.clone_from_slice(&auth_tag_bytes);
+        auth_tag[AUTH_TAG_LENGTH - auth_tag_bytes.len()..].copy_from_slice(&auth_tag_bytes);
 
         let mut id_nonce: Nonce = Default::default();
-        if id_nonce_bytes.len() != ID_NONCE_LENGTH {
+        if id_nonce_bytes.len() > ID_NONCE_LENGTH {
             return Err(DecoderError::Custom("Invalid Nonce length"));
         }
-
-        id_nonce.clone_from_slice(&id_nonce_bytes);
+        id_nonce[ID_NONCE_LENGTH - id_nonce_bytes.len()..].copy_from_slice(&id_nonce_bytes);
 
         // currently only support gcm scheme
         let auth_scheme_name = String::from_utf8_lossy(&auth_scheme_bytes);
@@ -207,12 +222,10 @@ mod tests {
         let sig: [u8; 32] = rand::random();
 
         let key = Keypair::generate_secp256k1();
-        let id = "v5";
         let tcp = 30303;
 
         let enr = {
-            let mut builder = EnrBuilder::new();
-            builder.id(id);
+            let mut builder = EnrBuilder::new("v4");
             builder.tcp(tcp);
             builder.build(&key).unwrap()
         };

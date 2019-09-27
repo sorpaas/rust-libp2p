@@ -2,7 +2,6 @@
 //! this is the uncompressed encoded form of the public key).
 
 use crate::enr_keypair::EnrPublicKey;
-use hex;
 use libp2p_core::identity::PublicKey;
 use sha3::{Digest, Keccak256};
 

@@ -1,6 +1,6 @@
 #![cfg(test)]
 use super::*;
-use crate::rpc::{Request, RpcType};
+use crate::rpc::{Request, Response, RpcType};
 use enr::EnrBuilder;
 use libp2p_core::identity::Keypair;
 use std::net::IpAddr;
@@ -20,12 +20,12 @@ fn simple_session_message() {
     let keypair = Keypair::generate_secp256k1();
     let keypair_2 = Keypair::generate_secp256k1();
 
-    let sender_enr = EnrBuilder::new()
+    let sender_enr = EnrBuilder::new("v4")
         .ip(ip)
         .udp(sender_port)
         .build(&keypair)
         .unwrap();
-    let receiver_enr = EnrBuilder::new()
+    let receiver_enr = EnrBuilder::new("v4")
         .ip(ip)
         .udp(receiver_port)
         .build(&keypair_2)
@@ -84,7 +84,7 @@ fn simple_session_message() {
 
     tokio::run(
         sender
-            .select(receiver)
+            .select(receiver).timeout(Duration::from_secs(3))
             .map_err(|_| panic!("failed"))
             .map(|_| ()),
     );
@@ -99,12 +99,12 @@ fn multiple_messages() {
     let keypair = Keypair::generate_secp256k1();
     let keypair_2 = Keypair::generate_secp256k1();
 
-    let sender_enr = EnrBuilder::new()
+    let sender_enr = EnrBuilder::new("v4")
         .ip(ip)
         .udp(sender_port)
         .build(&keypair)
         .unwrap();
-    let receiver_enr = EnrBuilder::new()
+    let receiver_enr = EnrBuilder::new("v4")
         .ip(ip)
         .udp(receiver_port)
         .build(&keypair_2)
@@ -118,6 +118,11 @@ fn multiple_messages() {
     let send_message = ProtocolMessage {
         id: 1,
         body: RpcType::Request(Request::Ping { enr_seq: 1 }),
+    };
+
+    let pong_response = ProtocolMessage {
+        id: 1,
+        body: RpcType::Response(Response::Ping { enr_seq: 1, ip: ip, port: sender_port }),
     };
 
     let receiver_send_message = send_message.clone();
@@ -161,6 +166,8 @@ fn multiple_messages() {
                 SessionEvent::Message { message, .. } => {
                     assert_eq!(*message, receiver_send_message);
                     message_count += 1;
+                    // required to send a pong response to establish the session
+                    let _ = receiver_service.send_request(&sender_enr, pong_response.clone()); 
                     if message_count == messages_to_send {
                         return Ok(Async::Ready(()));
                     }
@@ -172,7 +179,7 @@ fn multiple_messages() {
 
     tokio::run(
         sender
-            .select(receiver)
+            .select(receiver).timeout(Duration::from_secs(3))
             .map_err(|_| panic!("failed"))
             .map(|_| ()),
     );
