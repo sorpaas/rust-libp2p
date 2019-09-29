@@ -317,6 +317,8 @@ impl SessionService {
         tag
     }
 
+    /* Packet Handling */
+
     /// Handles a WHOAREYOU packet that was received from the network.
     fn handle_whoareyou(
         &mut self,

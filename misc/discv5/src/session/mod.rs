@@ -220,8 +220,8 @@ impl Session {
         }
 
         let keys = Keys {
-            encryption_key,
             auth_resp_key,
+            encryption_key,
             decryption_key,
         };
 
@@ -260,10 +260,11 @@ impl Session {
             )?;
 
         let keys = Keys {
-            encryption_key,
             auth_resp_key,
+            encryption_key,
             decryption_key,
         };
+
 
         // encrypt the message with the newly generated session keys
         let (auth_header, ciphertext) = crypto::encrypt_with_header(

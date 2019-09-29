@@ -84,7 +84,7 @@ fn simple_session_message() {
 
     tokio::run(
         sender
-            .select(receiver).timeout(Duration::from_secs(3))
+            .select(receiver).timeout(Duration::from_millis(100))
             .map_err(|_| panic!("failed"))
             .map(|_| ()),
     );
@@ -179,7 +179,7 @@ fn multiple_messages() {
 
     tokio::run(
         sender
-            .select(receiver).timeout(Duration::from_secs(3))
+            .select(receiver).timeout(Duration::from_millis(100))
             .map_err(|_| panic!("failed"))
             .map(|_| ()),
     );

@@ -234,7 +234,7 @@ pub fn encrypt_with_header(
     ephem_pubkey: &[u8],
     tag: &Tag,
 ) -> Result<(AuthHeader, Vec<u8>), Discv5Error> {
-    let ciphertext = encrypt_message(auth_resp_key, [0u8; 12], auth_pt, &[])?;
+    let encrypted_auth_response  = encrypt_message(auth_resp_key, [0u8; 12], auth_pt, &[])?;
 
     // get the rlp_encoded auth_header
     let auth_tag: [u8; 12] = rand::random();
@@ -242,15 +242,15 @@ pub fn encrypt_with_header(
         auth_tag,
         id_nonce.clone(),
         ephem_pubkey.to_vec(),
-        ciphertext,
+        encrypted_auth_response,
     );
 
     let mut auth_data = tag.to_vec();
     auth_data.append(&mut auth_header.encode());
 
-    let ciphertext = encrypt_message(encryption_key, auth_tag, message, &auth_data)?;
+    let message_ciphertext = encrypt_message(encryption_key, auth_tag, message, &auth_data)?;
 
-    Ok((auth_header, ciphertext))
+    Ok((auth_header, message_ciphertext))
 }
 
 /// A wrapper around the underlying default AES_GCM implementation. This may be abstracted in the
