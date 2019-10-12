@@ -523,10 +523,8 @@ impl SessionService {
         };
 
         // decrypt the message
-        let mut aad = tag.to_vec();
-        aad.append(&mut auth_header.encode());
         // continue on error
-        let _ = self.handle_message(src, src_id.clone(), auth_header.auth_tag, message, &aad);
+        let _ = self.handle_message(src, src_id.clone(), auth_header.auth_tag, message, tag);
 
         Ok(())
     }
@@ -538,8 +536,9 @@ impl SessionService {
         src_id: NodeId,
         auth_tag: AuthTag,
         message: &[u8],
-        aad: &[u8],
+        tag: Tag,
     ) -> Result<(), ()> {
+
         // check if we have an available session
         let session = match self.sessions.get_mut(&src_id) {
             Some(s) => s,
@@ -582,7 +581,7 @@ impl SessionService {
         let session_was_awaiting = session.is_awaiting_response();
 
         // attempt to decrypt and process the message. 
-        let message = match session.decrypt_message(auth_tag, message, aad) {
+        let message = match session.decrypt_message(auth_tag, message, &tag) {
             Ok(m) => ProtocolMessage::decode(m)
                 .map_err(|e| warn!("Failed to decode message. Error: {:?}", e))?,
             Err(e) => {
@@ -805,7 +804,7 @@ impl SessionService {
                             message,
                         } => {
                             let src_id = self.src_id(&tag);
-                            let _ = self.handle_message(src, src_id, auth_tag, &message, &tag);
+                            let _ = self.handle_message(src, src_id, auth_tag, &message, tag);
                         }
                         Packet::RandomPacket { .. } => {} // this will not be decoded.
                     }

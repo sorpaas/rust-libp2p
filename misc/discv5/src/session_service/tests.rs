@@ -5,6 +5,7 @@ use enr::EnrBuilder;
 use libp2p_core::identity::Keypair;
 use std::net::IpAddr;
 use tokio::prelude::*;
+use std::sync::{Arc,Mutex};
 
 fn init() {
     let _ = env_logger::builder().is_test(true).try_init();
@@ -82,12 +83,16 @@ fn simple_session_message() {
         }
     });
 
+    let test_result = Arc::new(Mutex::new(true));
+    let thread_result = test_result.clone();
     tokio::run(
         sender
             .select(receiver).timeout(Duration::from_millis(100))
-            .map_err(|_| panic!("failed"))
+            .map_err(move |_| 
+                     *thread_result.lock().unwrap() = false)
             .map(|_| ()),
     );
+    assert!(*test_result.lock().unwrap());
 }
 
 #[test]
@@ -177,10 +182,14 @@ fn multiple_messages() {
         }
     });
 
+    let test_result = Arc::new(Mutex::new(true));
+    let thread_result = test_result.clone();
     tokio::run(
         sender
             .select(receiver).timeout(Duration::from_millis(100))
-            .map_err(|_| panic!("failed"))
+            .map_err(move |_| 
+                     *thread_result.lock().unwrap() = false)
             .map(|_| ()),
     );
+    assert!(*test_result.lock().unwrap());
 }

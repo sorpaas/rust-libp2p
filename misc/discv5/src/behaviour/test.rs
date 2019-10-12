@@ -4,12 +4,14 @@ use crate::{Discv5, Discv5Event};
 use env_logger;
 use libp2p_core::{
     identity,
+    Transport,
     muxing::StreamMuxerBox,
     nodes::Substream,
-    transport::{boxed::Boxed, MemoryTransport},
-    upgrade, PeerId, Transport,
+    PeerId,
+    transport::MemoryTransport,
+    transport::boxed::Boxed,
 };
-use libp2p_swarm::Swarm;
+use libp2p_swarm::{Swarm};
 use tokio::prelude::*;
 
 use crate::kbucket;
@@ -29,7 +31,9 @@ fn init() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
 
-fn build_swarms(n: usize) -> Vec<SwarmType> {
+fn build_swarms(n: usize) -> 
+Vec<SwarmType> 
+ {
     let base_port = 10000u16;
     let mut swarms = Vec::new();
     let ip: IpAddr = "127.0.0.1".parse().unwrap();
@@ -41,15 +45,12 @@ fn build_swarms(n: usize) -> Vec<SwarmType> {
             .udp(port)
             .build(&keypair)
             .unwrap();
-        // unused transport for building a swarm
+        // transport for building a swarm
         let transport = MemoryTransport::default()
-            .with_upgrade(SecioConfig::new(keypair.clone()))
-            .and_then(move |out, endpoint| {
-                let peer_id = out.remote_key.into_peer_id();
-                let yamux = yamux::Config::default();
-                upgrade::apply(out.stream, yamux, endpoint)
-                    .map(|muxer| (peer_id, StreamMuxerBox::new(muxer)))
-            })
+            .upgrade(libp2p_core::upgrade::Version::V1)
+            .authenticate(SecioConfig::new(keypair.clone()))
+            .multiplex(yamux::Config::default())
+            .map(|(p, m), _| (p, StreamMuxerBox::new(m)))
             .map_err(|e| panic!("Failed to create transport: {:?}", e))
             .boxed();
         let discv5 = Discv5::new(enr, keypair.clone(), ip.into()).unwrap();

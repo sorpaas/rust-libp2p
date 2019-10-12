@@ -21,8 +21,8 @@ use tokio::timer::Delay;
 use zeroize::Zeroize;
 use log::debug;
 
-
 mod crypto;
+mod ecdh_ident;
 
 const WHOAREYOU_STRING: &str = "WHOAREYOU";
 

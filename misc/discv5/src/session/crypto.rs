@@ -1,10 +1,10 @@
-///! Implementation for generating session keys in the Discv5 protocol.
-///! Currently, Diffie-Hellman key agreement is performed with known public key types. Session keys
-///! are then derived using the HKDF (SHA2-256) key derivation function.
-///
-/// There is no abstraction in this module as the specification explicitly defines a singular
-/// encryption and key-derivation algorithms. Future versions may abstract some of these to allow
-/// for different algorithms.
+//! Implementation for generating session keys in the Discv5 protocol.
+//! Currently, Diffie-Hellman key agreement is performed with known public key types. Session keys
+//! are then derived using the HKDF (SHA2-256) key derivation function.
+//!
+//! There is no abstraction in this module as the specification explicitly defines a singular
+//! encryption and key-derivation algorithms. Future versions may abstract some of these to allow
+//! for different algorithms.
 use crate::error::Discv5Error;
 use crate::packet::{AuthHeader, AuthResponse, AuthTag, Nonce, Tag};
 use enr::{Enr, NodeId};
@@ -13,6 +13,7 @@ use libp2p_core::{identity::Keypair, PublicKey};
 use openssl::symm::{decrypt_aead, encrypt_aead, Cipher};
 use sha2::Sha256;
 use secp256k1::Signature;
+use super::ecdh_ident::EcdhIdent;
 
 const NODE_ID_LENGTH: usize = 32;
 const INFO_LENGTH: usize = 26 + 2 * NODE_ID_LENGTH;
@@ -55,9 +56,9 @@ pub fn generate_session_keys(
             let ephem_sk = secp256k1::SecretKey::parse(&ephem_libp2p_sk.to_bytes()).expect("valid key");
             let ephem_pk = secp256k1::PublicKey::from_secret_key(&ephem_sk);
 
-            let secret = secp256k1::SharedSecret::new(&remote_pk, &ephem_sk).map_err(|_| Discv5Error::KeyDerivationFailed)?;
-            // store as uncompressed
-            let ephem_pk = ephem_pk.serialize().to_vec();
+            let secret = secp256k1::SharedSecret::<EcdhIdent>::new(&remote_pk, &ephem_sk).map_err(|_| Discv5Error::KeyDerivationFailed)?;
+            // store as uncompressed, strip the first byte and send only 64 bytes.
+            let ephem_pk = ephem_pk.serialize()[1..].to_vec();
 
             (secret, ephem_pk)
         }
@@ -121,7 +122,7 @@ pub fn derive_keys_from_pubkey(
 
             let sk = secp256k1::SecretKey::parse(&key.secret().to_bytes()).expect("valid key");
 
-            let secret = secp256k1::SharedSecret::new(&remote_pubkey, &sk).map_err(|_| Discv5Error::KeyDerivationFailed)?;
+            let secret = secp256k1::SharedSecret::<EcdhIdent>::new(&remote_pubkey, &sk).map_err(|_| Discv5Error::KeyDerivationFailed)?;
             secret.as_ref().to_vec()
         }
     };
@@ -210,7 +211,6 @@ pub fn decrypt_message(
     let mut mac: [u8; 16] = Default::default();
     mac.copy_from_slice(&message[message.len() - 16..]);
 
-
     decrypt_aead(
         Cipher::aes_128_gcm(),
         key,
@@ -220,6 +220,7 @@ pub fn decrypt_message(
         &mac,
     )
     .map_err(|e| Discv5Error::DecryptionFail(format!("Could not decrypt message. Error: {:?}", e)))
+
 }
 
 /* Encryption related functions */
@@ -245,10 +246,7 @@ pub fn encrypt_with_header(
         encrypted_auth_response,
     );
 
-    let mut auth_data = tag.to_vec();
-    auth_data.append(&mut auth_header.encode());
-
-    let message_ciphertext = encrypt_message(encryption_key, auth_tag, message, &auth_data)?;
+    let message_ciphertext = encrypt_message(encryption_key, auth_tag, message, &tag[..])?;
 
     Ok((auth_header, message_ciphertext))
 }
