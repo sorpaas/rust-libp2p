@@ -21,8 +21,9 @@ use libp2p_secio::SecioConfig;
 use libp2p_yamux as yamux;
 use std::io;
 use std::net::IpAddr;
+use std::time::Duration;
+use std::sync::{Arc,Mutex};
 
-use tokio::runtime::Runtime;
 
 type SwarmType =
     Swarm<Boxed<(PeerId, StreamMuxerBox), io::Error>, Discv5<Substream<StreamMuxerBox>>>;
@@ -97,9 +98,10 @@ fn test_findnode_query() {
         .take(node_num - 1)
         .collect();
 
-    Runtime::new()
-        .unwrap()
-        .block_on(future::poll_fn(move || -> Result<_, io::Error> {
+    let test_result = Arc::new(Mutex::new(true));
+    let thread_result = test_result.clone();
+
+    tokio::run(future::poll_fn(move || -> Result<_, io::Error> {
             for swarm in swarms.iter_mut() {
                 loop {
                     match swarm.poll().unwrap() {
@@ -122,6 +124,10 @@ fn test_findnode_query() {
                 }
             }
             Ok(Async::NotReady)
-        }))
-        .unwrap();
+        }).timeout(Duration::from_millis(500))
+            .map_err(move |_| 
+                     *thread_result.lock().unwrap() = false)
+            .map(|_| ()));
+
+    assert!(*test_result.lock().unwrap());
 }

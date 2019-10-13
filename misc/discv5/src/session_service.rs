@@ -18,7 +18,7 @@
 //TODO: Limit packets per node to avoid DOS/Spam.
 //TODO: Update the Session and request timeouts to a DelayQueue.
 
-use super::packet::{AuthHeader, AuthResponse, AuthTag, Magic, Nonce, Packet, Tag, TAG_LENGTH};
+use super::packet::{AuthHeader, AuthTag, Magic, Nonce, Packet, Tag, TAG_LENGTH};
 use super::service::Discv5Service;
 use crate::error::Discv5Error;
 use crate::rpc::ProtocolMessage;
@@ -346,7 +346,7 @@ impl SessionService {
             }
         };
         let req = req.ok_or_else(|| {
-            debug!("Received a WHOAREYOU packet that references an unknown or expired request. Source: {:?}", src);
+            debug!("Received a WHOAREYOU packet that references an unknown or expired request. source: {:?}, auth_tag: {}", src, hex::encode(token));
         })?;
 
         debug!("Received a WHOAREYOU packet. Source: {}", src);
@@ -390,14 +390,6 @@ impl SessionService {
         // Update the session (this must be the socket that we sent the referenced request to)
         session.set_last_seen_socket(src);
 
-        // Build a nonce signature
-        let sig =  Session::sign_nonce(&self.keypair, &id_nonce).map_err(|e| {
-            error!(
-                "Error signing WHOAREYOU Nonce. Ignoring  WHOAREYOU packet. Error: {:?}",
-                e
-            )
-        })?;
-
         // Update the ENR record if necessary
         let updated_enr = if enr_seq < self.enr.seq() {
             Some(self.enr.clone())
@@ -405,15 +397,13 @@ impl SessionService {
             None
         };
 
-        // Generate the auth response to be encrypted
-        let auth_pt = AuthResponse::new(&sig, updated_enr).encode();
-
         // Generate session keys and encrypt the earliest packet with the authentication header
         let auth_packet = match session.encrypt_with_header(
             tag,
+            &self.keypair,
+            updated_enr,
             &self.enr.node_id(),
             &id_nonce,
-            &auth_pt,
             &message.clone().encode(),
         ) {
             Ok(p) => p,

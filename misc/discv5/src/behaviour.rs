@@ -774,11 +774,6 @@ where
         >,
     > {
         loop {
-            // Drain queued events
-            if !self.events.is_empty() {
-                return Async::Ready(NetworkBehaviourAction::GenerateEvent(self.events.remove(0)));
-            }
-            self.events.shrink_to_fit();
 
             // Process events from the session service
             while let Async::Ready(event) = self.service.poll() {
@@ -823,6 +818,12 @@ where
                     }
                 }
             }
+
+            // Drain queued events
+            if !self.events.is_empty() {
+                return Async::Ready(NetworkBehaviourAction::GenerateEvent(self.events.remove(0)));
+            }
+            self.events.shrink_to_fit();
 
             // Drain applied pending entries from the routing table.
             if let Some(entry) = self.kbuckets.take_applied_pending() {

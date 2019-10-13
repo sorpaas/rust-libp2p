@@ -9,7 +9,7 @@
 //!
 //! This `Session` module is responsible for generating, deriving and holding keys for sessions for known peers.
 
-use super::packet::{AuthHeader, AuthTag, Nonce, Packet, Tag, MAGIC_LENGTH};
+use super::packet::{AuthHeader, AuthResponse, AuthTag, Nonce, Packet, Tag, MAGIC_LENGTH};
 use crate::session_service::{SESSION_TIMEOUT, SESSION_ESTABLISH_TIMEOUT};
 use crate::Discv5Error;
 use enr::{Enr, NodeId};
@@ -175,6 +175,7 @@ impl Session {
         id_nonce: Nonce,
         auth_header: &AuthHeader,
     ) -> Result<bool, Discv5Error> {
+
         // generate session keys
         let (decryption_key, encryption_key, auth_resp_key) = crypto::derive_keys_from_pubkey(
             local_keypair,
@@ -213,6 +214,7 @@ impl Session {
         // verify the auth header nonce
         if !crypto::verify_authentication_nonce(
             &remote_public_key,
+            &auth_header.ephemeral_pubkey,
             &id_nonce,
             &auth_response.signature,
         ) {
@@ -243,52 +245,62 @@ impl Session {
     pub fn encrypt_with_header(
         &mut self,
         tag: Tag,
+        keypair: &Keypair,
+        updated_enr: Option<Enr>,
         local_node_id: &NodeId,
         id_nonce: &Nonce,
-        auth_pt: &[u8],
         message: &[u8],
     ) -> Result<Packet, Discv5Error> {
 
-        // generate the session keys
-        let (encryption_key, decryption_key, auth_resp_key, ephem_pubkey) =
-            crypto::generate_session_keys(
-                local_node_id,
-                self.remote_enr
-                    .as_ref()
-                    .expect("Should never be None at this point"),
-                id_nonce,
-            )?;
-
-        let keys = Keys {
-            auth_resp_key,
-            encryption_key,
-            decryption_key,
-        };
-
-
-        // encrypt the message with the newly generated session keys
-        let (auth_header, ciphertext) = crypto::encrypt_with_header(
-            &keys.auth_resp_key,
-            &keys.encryption_key,
+    // generate the session keys
+    let (encryption_key, decryption_key, auth_resp_key, ephem_pubkey) =
+        crypto::generate_session_keys(
+            local_node_id,
+            self.remote_enr
+                .as_ref()
+                .expect("Should never be None at this point"),
             id_nonce,
-            auth_pt,
-            message,
-            &ephem_pubkey,
-            &tag,
         )?;
 
-        // update the session state
-        match std::mem::replace(&mut self.state, SessionState::Poisoned) {
+    let keys = Keys {
+        auth_resp_key,
+        encryption_key,
+        decryption_key,
+    };
+
+    // construct the nonce signature
+    let sig =  crypto::sign_nonce(keypair, id_nonce, &ephem_pubkey).map_err(|_| Discv5Error::Custom("Could not sign WHOAREYOU nonce"))?;
+
+    // generate the auth response to be encrypted
+    let auth_pt = AuthResponse::new(&sig, updated_enr).encode();
+
+    // encrypt the auth response
+    let auth_response_ciphertext  = crypto::encrypt_message(&auth_resp_key, [0u8; 12], &auth_pt, &[])?;
+
+    // generate an auth header, with a random auth_tag
+    let auth_tag: [u8; 12] = rand::random();
+    let auth_header = AuthHeader::new(
+        auth_tag,
+        id_nonce.clone(),
+        ephem_pubkey.to_vec(),
+        auth_response_ciphertext,
+    );
+
+    // encrypt the message
+    let message_ciphertext = crypto::encrypt_message(&encryption_key, auth_tag, message, &tag[..])?;
+
+    // update the session state
+    match std::mem::replace(&mut self.state, SessionState::Poisoned) {
         SessionState::Established(current_keys) => self.state = SessionState::EstablishedAwaitingResponse{ current_keys, new_keys: keys},
         SessionState::Poisoned => panic!(),
         _=> self.state = SessionState::AwaitingResponse(keys),
-        }
+    }
 
-        Ok(Packet::AuthMessage {
-            tag,
-            auth_header,
-            message: ciphertext,
-        })
+    Ok(Packet::AuthMessage {
+        tag,
+        auth_header,
+        message: message_ciphertext,
+    })
     }
 
     /// Uses the current `Session` to encrypt a message. Encrypt packets with the current session
@@ -363,11 +375,6 @@ impl Session {
             _ => return Err(Discv5Error::SessionNotEstablished)
         }
 
-    }
-
-    /// Builds the signature for a given nonce.
-    pub fn sign_nonce(keypair: &Keypair, id_nonce: &Nonce) -> Result<Vec<u8>, Discv5Error> {
-        crypto::sign_nonce(keypair, id_nonce)
     }
 
     /* Session Helper Functions */

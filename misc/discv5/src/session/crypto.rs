@@ -6,7 +6,7 @@
 //! encryption and key-derivation algorithms. Future versions may abstract some of these to allow
 //! for different algorithms.
 use crate::error::Discv5Error;
-use crate::packet::{AuthHeader, AuthResponse, AuthTag, Nonce, Tag};
+use crate::packet::{AuthHeader, AuthResponse, AuthTag, Nonce};
 use enr::{Enr, NodeId};
 use hkdf::Hkdf;
 use libp2p_core::{identity::Keypair, PublicKey};
@@ -133,8 +133,8 @@ pub fn derive_keys_from_pubkey(
 /* Nonce Signing */
 
 /// Generates a signature of a nonce given a keypair. This prefixes 
-pub fn sign_nonce(keypair: &Keypair, nonce: &Nonce) -> Result<Vec<u8>, Discv5Error> {
-    let signing_nonce = generate_signing_nonce(nonce);
+pub fn sign_nonce(keypair: &Keypair, nonce: &Nonce, ephem_pubkey: &[u8]) -> Result<Vec<u8>, Discv5Error> {
+    let signing_nonce = generate_signing_nonce(nonce, ephem_pubkey);
 
     match keypair {
         Keypair::Rsa(_) => unimplemented!("RSA keys are not supported"),
@@ -149,13 +149,14 @@ pub fn sign_nonce(keypair: &Keypair, nonce: &Nonce) -> Result<Vec<u8>, Discv5Err
 
 /// Verifies the authentication header nonce.
 pub fn verify_authentication_nonce(
-    remote_public_key: &PublicKey,
+    remote_pubkey: &PublicKey,
+    remote_ephem_pubkey: &[u8],
     nonce: &Nonce,
     sig: &[u8],
 ) -> bool {
-    let signing_nonce = generate_signing_nonce(nonce);
+    let signing_nonce = generate_signing_nonce(nonce, remote_ephem_pubkey);
 
-    match remote_public_key {
+    match remote_pubkey {
         PublicKey::Rsa(_) => unimplemented!("RSA keys are not supported"),
         PublicKey::Ed25519(_) => unimplemented!("Ed25519 keys are not supported"),
         // verifies secp256k1 serialized compact signatures
@@ -168,10 +169,12 @@ pub fn verify_authentication_nonce(
     }
 }
 
-/// Builds the signature for a given nonce. This is the SHA256( 
-fn generate_signing_nonce(id_nonce: &Nonce) -> Vec<u8> {
+/// Builds the signature for a given nonce. The SHA256 hash occurs in the secp256k1 signing
+/// function.
+fn generate_signing_nonce(id_nonce: &Nonce, ephem_pubkey: &[u8]) -> Vec<u8> {
     let mut nonce = NONCE_PREFIX.as_bytes().to_vec();
     nonce.append(&mut id_nonce.to_vec());
+    nonce.append(&mut ephem_pubkey.to_vec());
     nonce
 }
 
@@ -225,32 +228,6 @@ pub fn decrypt_message(
 
 /* Encryption related functions */
 
-/// Encrypts a message with an authentication header.
-pub fn encrypt_with_header(
-    auth_resp_key: &Key,
-    encryption_key: &Key,
-    id_nonce: &Nonce,
-    auth_pt: &[u8],
-    message: &[u8],
-    ephem_pubkey: &[u8],
-    tag: &Tag,
-) -> Result<(AuthHeader, Vec<u8>), Discv5Error> {
-    let encrypted_auth_response  = encrypt_message(auth_resp_key, [0u8; 12], auth_pt, &[])?;
-
-    // get the rlp_encoded auth_header
-    let auth_tag: [u8; 12] = rand::random();
-    let auth_header = AuthHeader::new(
-        auth_tag,
-        id_nonce.clone(),
-        ephem_pubkey.to_vec(),
-        encrypted_auth_response,
-    );
-
-    let message_ciphertext = encrypt_message(encryption_key, auth_tag, message, &tag[..])?;
-
-    Ok((auth_header, message_ciphertext))
-}
-
 /// A wrapper around the underlying default AES_GCM implementation. This may be abstracted in the
 /// future.
 pub fn encrypt_message(
@@ -280,6 +257,7 @@ pub fn encrypt_message(
 mod tests {
 
     use super::*;
+    use crate::packet::Tag;
     use enr::EnrBuilder;
     use libp2p_core::identity::Keypair;
     use rand;

@@ -125,9 +125,8 @@ impl Encodable for AuthHeader {
     fn rlp_append(&self, s: &mut RlpStream) {
         s.begin_list(5);
         s.append(&self.auth_tag.to_vec());
-        // TODO: Note scheme and nonce are reversed to match the go spec
-        s.append(&self.auth_scheme_name);
         s.append(&self.id_nonce.to_vec());
+        s.append(&self.auth_scheme_name);
         s.append(&self.ephemeral_pubkey.clone());
         s.append(&self.auth_response.to_vec());
     }
@@ -164,16 +163,16 @@ impl Decodable for AuthHeader {
         let pubkey_bytes = decoded_list
             .pop()
             .ok_or_else(|| DecoderError::RlpExpectedToBeData)?;
-        //TODO: Note scheme and nonce are swapped to match the go impl
-        let id_nonce_bytes = decoded_list
+        let auth_scheme_bytes = decoded_list
             .pop()
             .ok_or_else(|| DecoderError::RlpExpectedToBeData)?;
-        let auth_scheme_bytes = decoded_list
+        let id_nonce_bytes = decoded_list
             .pop()
             .ok_or_else(|| DecoderError::RlpExpectedToBeData)?;
         let auth_tag_bytes = decoded_list
             .pop()
             .ok_or_else(|| DecoderError::RlpExpectedToBeData)?;
+
 
         let mut auth_tag: AuthTag = Default::default();
         if auth_tag_bytes.len() > AUTH_TAG_LENGTH {
