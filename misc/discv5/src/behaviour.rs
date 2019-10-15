@@ -319,13 +319,23 @@ impl<TSubstream> Discv5<TSubstream> {
                     }
 
                     // check if we need to request a new ENR
-                    if let Some(enr) = self.find_enr(&node_id) {
-                        if enr.seq() < enr_seq {
-                            // request an ENR update
-                            debug!("Requesting an ENR update from node: {}", node_id);
-                            let req = rpc::Request::FindNode { distance: 0 };
-                            self.send_rpc_request(&node_id, req, None);
+                    let enr = self.find_enr(&node_id);
+
+                    match enr {
+                        Some(enr) => {
+                            if enr.seq() < enr_seq {
+                                // request an ENR update
+                                debug!("Requesting an ENR update from node: {}", node_id);
+                                let req = rpc::Request::FindNode { distance: 0 };
+                                self.send_rpc_request(&node_id, req, None);
+                            }
+                            self.connection_updated(
+                                node_id.clone(),
+                                Some(enr),
+                                NodeStatus::Connected,
+                            )
                         }
+                        None => (),
                     }
                 }
                 _ => {} //TODO: Implement all RPC methods
@@ -774,7 +784,6 @@ where
         >,
     > {
         loop {
-
             // Process events from the session service
             while let Async::Ready(event) = self.service.poll() {
                 match event {
