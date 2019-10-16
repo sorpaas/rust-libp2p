@@ -329,11 +329,7 @@ impl<TSubstream> Discv5<TSubstream> {
                                 let req = rpc::Request::FindNode { distance: 0 };
                                 self.send_rpc_request(&node_id, req, None);
                             }
-                            self.connection_updated(
-                                node_id.clone(),
-                                Some(enr),
-                                NodeStatus::Connected,
-                            )
+                            self.connection_updated(node_id.clone(), None, NodeStatus::Connected)
                         }
                         None => (),
                     }
