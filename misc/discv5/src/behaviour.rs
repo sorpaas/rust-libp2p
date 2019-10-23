@@ -411,14 +411,15 @@ impl<TSubstream> Discv5<TSubstream> {
             let mut rpc_index = 0;
             to_send_nodes.push(Vec::new());
             for entry in nodes.into_iter() {
-                if entry.node.value.size() + total_size < MAX_PACKET_SIZE - 80 {
-                    total_size += entry.node.value.size();
+                let entry_size = entry.node.value.clone().encode().len();
+                if entry_size + total_size < MAX_PACKET_SIZE - 80 {
+                    total_size += entry_size;
                     trace!("Adding ENR, Valid? : {}", entry.node.value.verify());
                     trace!("Enr: {}", entry.node.value.clone());
                     trace!("Enr: {:?}", entry.node.value.clone());
                     to_send_nodes[rpc_index].push(entry.node.value.clone());
                 } else {
-                    total_size = entry.node.value.size();
+                    total_size = entry_size;
                     to_send_nodes.push(vec![entry.node.value.clone()]);
                     rpc_index += 1;
                 }
@@ -774,7 +775,6 @@ where
         >,
     > {
         loop {
-
             // Process events from the session service
             while let Async::Ready(event) = self.service.poll() {
                 match event {
