@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::{marker::PhantomData, time::Duration};
-use tokio::timer::Interval;
+use tokio_timer::Interval;
 use tokio_io::{AsyncRead, AsyncWrite};
 
 mod ip_vote;

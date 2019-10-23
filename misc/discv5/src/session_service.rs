@@ -35,7 +35,7 @@ use std::default::Default;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
-use tokio::timer::Delay;
+use tokio_timer::Delay;
 
 mod tests;
 

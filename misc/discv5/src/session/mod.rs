@@ -17,7 +17,7 @@ use libp2p_core::identity::Keypair;
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use tokio::timer::Delay;
+use tokio_timer::Delay;
 use zeroize::Zeroize;
 use log::debug;
 
