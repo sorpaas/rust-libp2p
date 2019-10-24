@@ -415,11 +415,6 @@ impl Enr {
         // update the node id
         self.node_id = NodeId::from(keypair.public());
 
-        // check the size of the record
-        if self.size() > MAX_ENR_SIZE {
-            return Err(EnrError::ExceedsMaxSize);
-        }
-
         Ok(true)
     }
 

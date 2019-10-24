@@ -418,7 +418,10 @@ impl<TSubstream> Discv5<TSubstream> {
             to_send_nodes.push(Vec::new());
             for entry in nodes.into_iter() {
                 let entry_size = entry.node.value.clone().encode().len();
-                if entry_size + total_size < MAX_PACKET_SIZE - 80 {
+                // Responses assume that a session is established. Thus, on top of the encoded
+                // ENR's the packet should be a regular message. A regular message has a tag (32
+                // bytes), and auth_tag (12 bytes) and the NODES response has an ID (8 bytes) and a total (8 bytes). The encryption adds the HMAC (16 bytes) and can be at most 16 bytes larger so the total packet size can be at most 92 (given AES_GCM).
+                if entry_size + total_size < MAX_PACKET_SIZE - 92 {
                     total_size += entry_size;
                     trace!("Adding ENR, Valid? : {}", entry.node.value.verify());
                     trace!("Enr: {}", entry.node.value.clone());
