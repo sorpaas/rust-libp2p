@@ -3,15 +3,10 @@
 use crate::{Discv5, Discv5Event};
 use env_logger;
 use libp2p_core::{
-    identity,
-    Transport,
-    muxing::StreamMuxerBox,
-    nodes::Substream,
-    PeerId,
-    transport::MemoryTransport,
-    transport::boxed::Boxed,
+    identity, muxing::StreamMuxerBox, nodes::Substream, transport::boxed::Boxed,
+    transport::MemoryTransport, PeerId, Transport,
 };
-use libp2p_swarm::{Swarm};
+use libp2p_swarm::Swarm;
 use tokio::prelude::*;
 
 use crate::kbucket;
@@ -21,9 +16,8 @@ use libp2p_secio::SecioConfig;
 use libp2p_yamux as yamux;
 use std::io;
 use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::sync::{Arc,Mutex};
-
 
 type SwarmType =
     Swarm<Boxed<(PeerId, StreamMuxerBox), io::Error>, Discv5<Substream<StreamMuxerBox>>>;
@@ -32,9 +26,7 @@ fn init() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
 
-fn build_swarms(n: usize) -> 
-Vec<SwarmType> 
- {
+fn build_swarms(n: usize) -> Vec<SwarmType> {
     let base_port = 10000u16;
     let mut swarms = Vec::new();
     let ip: IpAddr = "127.0.0.1".parse().unwrap();
@@ -101,7 +93,8 @@ fn test_findnode_query() {
     let test_result = Arc::new(Mutex::new(true));
     let thread_result = test_result.clone();
 
-    tokio::run(future::poll_fn(move || -> Result<_, io::Error> {
+    tokio::run(
+        future::poll_fn(move || -> Result<_, io::Error> {
             for swarm in swarms.iter_mut() {
                 loop {
                     match swarm.poll().unwrap() {
@@ -124,10 +117,11 @@ fn test_findnode_query() {
                 }
             }
             Ok(Async::NotReady)
-        }).timeout(Duration::from_millis(500))
-            .map_err(move |_| 
-                     *thread_result.lock().unwrap() = false)
-            .map(|_| ()));
+        })
+        .timeout(Duration::from_millis(500))
+        .map_err(move |_| *thread_result.lock().unwrap() = false)
+        .map(|_| ()),
+    );
 
     assert!(*test_result.lock().unwrap());
 }
