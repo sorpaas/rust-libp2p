@@ -345,6 +345,110 @@ mod tests {
         result
     }
 
+    /* This section provides a series of reference tests for the encoding of packets */
+
+    #[test]
+    fn ref_test_encode_random_packet() {
+        // reference input
+        let tag = [1u8; TAG_LENGTH]; // all 1's.
+        let auth_tag = [2u8; AUTH_TAG_LENGTH]; // all 2's
+        let random_data = [4u8; 44]; // 44 bytes of 4's;
+
+        // expected hex output
+        let expected_output = hex::decode("01010101010101010101010101010101010101010101010101010101010101018c0202020202020202020202020404040404040404040404040404040404040404040404040404040404040404040404040404040404040404").unwrap();
+
+        let packet = Packet::RandomPacket {
+            tag,
+            auth_tag,
+            data: random_data.to_vec(),
+        };
+
+        assert_eq!(packet.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_test_encode_whoareyou_packet() {
+        // reference input
+        let magic = [1u8; MAGIC_LENGTH]; // all 1's.
+        let token = [2u8; AUTH_TAG_LENGTH]; // all 2's
+        let id_nonce = [3u8; ID_NONCE_LENGTH]; // all 3's
+        let enr_seq = 1;
+
+        // expected hex output
+        let expected_output = hex::decode("0101010101010101010101010101010101010101010101010101010101010101ef8c020202020202020202020202a0030303030303030303030303030303030303030303030303030303030303030301").unwrap();
+
+        let packet = Packet::WhoAreYou {
+            magic,
+            token,
+            id_nonce,
+            enr_seq,
+        };
+
+        assert_eq!(packet.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_test_encode_auth_message_packet() {
+        // reference input
+        let tag_raw = hex::decode("93a7400fa0d6a694ebc24d5cf570f65d04215b6ac00757875e3f3a5f42107903").unwrap();
+        let auth_tag_raw = hex::decode("27b5af763c446acd2749fe8e").unwrap();
+        let id_nonce_raw = hex::decode("e551b1c44264ab92bc0b3c9b26293e1ba4fed9128f3c3645301e8e119f179c65").unwrap();
+        let ephemeral_pubkey = hex::decode("b35608c01ee67edff2cffa424b219940a81cf2fb9b66068b1cf96862a17d353e22524fbdcdebc609f85cbd58ebe7a872b01e24a3829b97dd5875e8ffbc4eea81").unwrap();
+        let auth_resp_ciphertext = hex::decode("570fbf23885c674867ab00320294a41732891457969a0f14d11c995668858b2ad731aa7836888020e2ccc6e0e5776d0d4bc4439161798565a4159aa8620992fb51dcb275c4f755c8b8030c82918898f1ac387f606852").unwrap();
+        let message_ciphertext = hex::decode("a5d12a2d94b8ccb3ba55558229867dc13bfa3648").unwrap();
+        
+        let expected_output = hex::decode("93a7400fa0d6a694ebc24d5cf570f65d04215b6ac00757875e3f3a5f42107903f8cc8c27b5af763c446acd2749fe8ea0e551b1c44264ab92bc0b3c9b26293e1ba4fed9128f3c3645301e8e119f179c658367636db840b35608c01ee67edff2cffa424b219940a81cf2fb9b66068b1cf96862a17d353e22524fbdcdebc609f85cbd58ebe7a872b01e24a3829b97dd5875e8ffbc4eea81b856570fbf23885c674867ab00320294a41732891457969a0f14d11c995668858b2ad731aa7836888020e2ccc6e0e5776d0d4bc4439161798565a4159aa8620992fb51dcb275c4f755c8b8030c82918898f1ac387f606852a5d12a2d94b8ccb3ba55558229867dc13bfa3648").unwrap();
+
+
+        let mut tag = [0u8; TAG_LENGTH]; 
+        tag.copy_from_slice(&tag_raw);
+        let mut auth_tag = [0u8; AUTH_TAG_LENGTH];
+        auth_tag.copy_from_slice(&auth_tag_raw);
+        let mut id_nonce = [0u8; ID_NONCE_LENGTH];
+        id_nonce.copy_from_slice(&id_nonce_raw);
+
+        let auth_header = AuthHeader::new(
+            auth_tag,
+            id_nonce,
+            ephemeral_pubkey,
+            auth_resp_ciphertext,
+        );
+
+        let packet = Packet::AuthMessage {
+            tag,
+            auth_header,
+            message: message_ciphertext,
+        };
+
+        assert_eq!(packet.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_test_encode_message_packet() {
+        // reference input
+        let tag_raw = hex::decode("93a7400fa0d6a694ebc24d5cf570f65d04215b6ac00757875e3f3a5f42107903").unwrap();
+        let auth_tag_raw = hex::decode("27b5af763c446acd2749fe8e").unwrap();
+        let message_ciphertext = hex::decode("a5d12a2d94b8ccb3ba55558229867dc13bfa3648").unwrap();
+
+        // expected hex output
+        let expected_output = hex::decode("93a7400fa0d6a694ebc24d5cf570f65d04215b6ac00757875e3f3a5f421079038c27b5af763c446acd2749fe8ea5d12a2d94b8ccb3ba55558229867dc13bfa3648").unwrap();
+
+        let mut tag = [0u8; TAG_LENGTH]; 
+        tag.copy_from_slice(&tag_raw);
+        let mut auth_tag = [0u8; AUTH_TAG_LENGTH];
+        auth_tag.copy_from_slice(&auth_tag_raw);
+
+        let packet = Packet::Message {
+            tag,
+            auth_tag,
+            message: message_ciphertext,
+        };
+
+        assert_eq!(packet.encode(), expected_output);
+    }
+
+    /* This section provides functionality testing of the packets */
+
     #[test]
     fn encode_decode_random_packet() {
         let _ = simple_logger::init_with_level(log::Level::Debug);
@@ -428,5 +532,4 @@ mod tests {
 
         assert_eq!(decoded_packet, packet);
     }
-
 }

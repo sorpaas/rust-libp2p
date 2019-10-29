@@ -426,6 +426,193 @@ mod tests {
     use enr::EnrBuilder;
     use libp2p_core::identity::Keypair;
 
+     #[test]
+    fn ref_test_encode_request_ping() {
+        // reference input
+        let id = 1;
+        let enr_seq = 1;
+        let body = RpcType::Request(Request::Ping { enr_seq });
+
+        // expected hex output
+        let expected_output = hex::decode("01c20101").unwrap();
+
+        let protocol_msg = ProtocolMessage { id, body };
+
+        assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_test_encode_request_findnode() {
+        // reference input
+        let id = 1;
+        let distance = 256;
+        let body = RpcType::Request(Request::FindNode { distance });
+
+        // expected hex output
+        let expected_output = hex::decode("03c401820100").unwrap();
+
+        let protocol_msg = ProtocolMessage { id, body };
+
+        assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_test_encode_request_ticket() {
+        // reference input
+        let id = 1;
+        let hash_bytes = hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736").unwrap();
+
+        // expected hex output
+        let expected_output =
+            hex::decode("05e201a0fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736")
+                .unwrap();
+
+        let mut topic_hash = [0;32];
+        topic_hash.copy_from_slice(&hash_bytes);
+
+        let body = RpcType::Request(Request::Ticket { topic: topic_hash });
+        let protocol_msg = ProtocolMessage { id, body };
+
+        assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_test_encode_request_register_topic() {
+        // reference input
+        let id = 1;
+        let ticket = hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736").unwrap();
+
+        // expected hex output
+        let expected_output =
+            hex::decode("07e201a0fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736")
+                .unwrap();
+
+        let body = RpcType::Request(Request::RegisterTopic { ticket });
+        let protocol_msg = ProtocolMessage { id, body };
+
+        assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_test_encode_request_topic_query() {
+        // reference input
+        let id = 1;
+        let hash_bytes = hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736").unwrap();
+
+        // expected hex output
+        let expected_output =
+            hex::decode("09e201a0fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736")
+                .unwrap();
+
+        let mut topic_hash = [0;32];
+        topic_hash.copy_from_slice(&hash_bytes);
+
+        let body = RpcType::Request(Request::TopicQuery { topic: topic_hash });
+        let protocol_msg = ProtocolMessage { id, body };
+
+        assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_test_encode_response_ping() {
+        // reference input
+        let id = 1;
+        let enr_seq = 1;
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        let port = 5000;
+        let body = RpcType::Response(Response::Ping { enr_seq, ip, port });
+
+        // expected hex output
+        let expected_output = hex::decode("02ca0101847f000001821388").unwrap();
+
+        let protocol_msg = ProtocolMessage { id, body };
+
+        assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_test_encode_response_nodes() {
+        // reference input
+        let id = 1;
+        let total = 1;
+        // ENR needs to be constructed from a keypair
+        let secret_key = libp2p_core::identity::secp256k1::SecretKey::from_bytes(
+            hex::decode("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+                .unwrap(),
+        )
+        .unwrap();
+
+        let key = Keypair::Secp256k1(libp2p_core::identity::secp256k1::Keypair::from(secret_key));
+        let enr = EnrBuilder::new("v4").build(&key).unwrap();
+        let body = RpcType::Response(Response::Nodes {
+            total,
+            nodes: vec![enr],
+        });
+        // expected hex output
+        let expected_output = hex::decode("04f87f0101b87bf879b877f875b8401ce2991c64993d7c84c29a00bdc871917551c7d330fca2dd0d69c706596dc655448f030b98a77d4001fd46ae0112ce26d613c5a6a02a81a6223cd0c4edaa53280182696482763489736563703235366b31a103ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138").unwrap();
+
+        let protocol_msg = ProtocolMessage { id, body };
+
+        assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_test_encode_response_nodes_multiple() {
+        // reference input
+        let id = 1;
+        let total = 2;
+        let enr = "enr:-HW4QBzimRxkmT18hMKaAL3IcZF1UcfTMPyi3Q1pxwZZbcZVRI8DC5infUAB_UauARLOJtYTxaagKoGmIjzQxO2qUygBgmlkgnY0iXNlY3AyNTZrMaEDymNMrg1JrLQB2KTGtv6MVbcNEVv0AHacwUAPMljNMTg".parse::<Enr>().unwrap();
+
+        let enr2 = "enr:-HW4QNfxw543Ypf4HXKXdYxkyzfcxcO-6p9X986WldfVpnVTQX1xlTnWrktEWUbeTZnmgOuAY_KUhbVV1Ft98WoYUBMBgmlkgnY0iXNlY3AyNTZrMaEDDiy3QkHAxPyOgWbxp5oF1bDdlYE6dLCUUp8xfVw50jU".parse::<Enr>().unwrap();
+        
+        let body = RpcType::Response(Response::Nodes {
+            total,
+            nodes: vec![enr, enr2],
+        });
+
+        // expected hex output
+        let expected_output = hex::decode("04f8f80102b8f4f8f2b877f875b8401ce2991c64993d7c84c29a00bdc871917551c7d330fca2dd0d69c706596dc655448f030b98a77d4001fd46ae0112ce26d613c5a6a02a81a6223cd0c4edaa53280182696482763489736563703235366b31a103ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138b877f875b840d7f1c39e376297f81d7297758c64cb37dcc5c3beea9f57f7ce9695d7d5a67553417d719539d6ae4b445946de4d99e680eb8063f29485b555d45b7df16a1850130182696482763489736563703235366b31a1030e2cb74241c0c4fc8e8166f1a79a05d5b0dd95813a74b094529f317d5c39d235").unwrap();
+
+        let protocol_msg = ProtocolMessage { id, body };
+
+        assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_test_encode_response_ticket() {
+        // reference input
+        let id = 1;
+        let ticket = [0; 32].to_vec(); // all 0's
+        let wait_time = 5;
+        let body = RpcType::Response(Response::Ticket { ticket, wait_time });
+
+        // expected hex output
+        let expected_output = hex::decode(
+            "06e301a0000000000000000000000000000000000000000000000000000000000000000005",
+        )
+        .unwrap();
+
+        let protocol_msg = ProtocolMessage { id, body };
+
+        assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_test_encode_response_register_topic() {
+        // reference input
+        let id = 1;
+        let registered = true;
+        let body = RpcType::Response(Response::RegisterTopic { registered });
+
+        // expected hex output
+        let expected_output = hex::decode("08c20101").unwrap();
+
+        let protocol_msg = ProtocolMessage { id, body };
+
+        assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+
     #[test]
     fn encode_decode_ping_request() {
         let request = ProtocolMessage {
