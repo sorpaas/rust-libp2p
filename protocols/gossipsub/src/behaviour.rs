@@ -5,15 +5,15 @@ use crate::protocol::{
     GossipsubControlAction, GossipsubMessage, GossipsubSubscription, GossipsubSubscriptionAction,
 };
 use crate::topic::{Topic, TopicHash};
-use cuckoofilter::CuckooFilter;
 use futures::prelude::*;
 use libp2p_core::{ConnectedPoint, Multiaddr, PeerId};
 use libp2p_swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters, ProtocolsHandler};
 use log::{debug, error, info, trace, warn};
+use lru::LruCache;
 use rand;
 use rand::{seq::SliceRandom, thread_rng};
 use smallvec::SmallVec;
-use std::collections::hash_map::{DefaultHasher, HashMap};
+use std::collections::hash_map::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
@@ -58,7 +58,7 @@ pub struct Gossipsub<TSubstream> {
 
     // We keep track of the messages we received (in the format `string(source ID, seq_no)`) so that
     // we don't dispatch the same message twice if we receive it twice on the network.
-    received: CuckooFilter<DefaultHasher>,
+    received: LruCache<String, ()>,
 
     /// Heartbeat interval stream.
     heartbeat: Interval,
@@ -81,7 +81,7 @@ impl<TSubstream> Gossipsub<TSubstream> {
             fanout: HashMap::new(),
             fanout_last_pub: HashMap::new(),
             mcache: MessageCache::new(gs_config.history_gossip, gs_config.history_length),
-            received: CuckooFilter::new(),
+            received: LruCache::new(256), // keep track of the last 256 messages
             heartbeat: Interval::new(
                 Instant::now() + gs_config.heartbeat_initial_delay,
                 gs_config.heartbeat_interval,
@@ -228,7 +228,7 @@ impl<TSubstream> Gossipsub<TSubstream> {
 
         // add published message to our received caches
         self.mcache.put(message.clone());
-        self.received.add(&message.id());
+        self.received.put(message.id(), ());
 
         let event = Arc::new(GossipsubRpc {
             subscriptions: Vec::new(),
@@ -246,7 +246,7 @@ impl<TSubstream> Gossipsub<TSubstream> {
         info!("Published message: {:?}", message.id());
     }
 
-    /// This function should be called when `config.propagate_messages` is false to order to
+    /// This function should be called when `config.manual_propagation` is `true` to order to
     /// propagate messages. Messages are stored in the Memcache and validation is expected to be
     /// fast enough that the messages should still exist in the cache.
     ///
@@ -497,7 +497,7 @@ impl<TSubstream> Gossipsub<TSubstream> {
         // if we have seen this message, ignore it
         // there's a 3% chance this is a false positive
         // TODO: Check this has no significant emergent behaviour
-        if !self.received.test_and_add(&msg.id()) {
+        if self.received.put(msg.id(), ()).is_some() {
             info!(
                 "Message already received, ignoring. Message: {:?}",
                 msg.id()
@@ -517,7 +517,7 @@ impl<TSubstream> Gossipsub<TSubstream> {
         }
 
         // forward the message to mesh peers, if no validation is required
-        if self.config.propagate_messages {
+        if !self.config.manual_propagation {
             let message_id = msg.id();
             self.forward_msg(msg, propagation_source);
             debug!("Completed message handling for message: {:?}", message_id);
@@ -906,7 +906,7 @@ impl<TSubstream> Gossipsub<TSubstream> {
         (*self
             .control_pool
             .entry(peer.clone())
-            .or_insert_with(|| Vec::new()))
+            .or_insert_with(Vec::new))
         .push(control.clone());
     }
 
@@ -982,7 +982,7 @@ where
 
     fn inject_disconnected(&mut self, id: &PeerId, _: ConnectedPoint) {
         // TODO: Refactor
-        // remove from mesh, topic_peers and peer_topic
+        // remove from mesh, topic_peers, peer_topic and fanout
         debug!("Peer disconnected: {:?}", id);
         {
             let topics = match self.peer_topics.get(&id) {
@@ -1022,6 +1022,13 @@ where
                         "ERROR: Disconnected node: {:?} with topic: {:?} not in topic_peers",
                         &id, &topic
                     );
+                }
+
+                // remove from fanout
+                if let Some(fanout_peers) = self.fanout.get_mut(&topic) {
+                    if let Some(pos) = fanout_peers.iter().position(|p| p == id) {
+                        fanout_peers.remove(pos);
+                    }
                 }
             }
         }
@@ -1090,10 +1097,7 @@ where
                     event: send_event,
                 } => match Arc::try_unwrap(send_event) {
                     Ok(event) => {
-                        return Async::Ready(NetworkBehaviourAction::SendEvent {
-                            peer_id,
-                            event: event,
-                        });
+                        return Async::Ready(NetworkBehaviourAction::SendEvent { peer_id, event });
                     }
                     Err(event) => {
                         return Async::Ready(NetworkBehaviourAction::SendEvent {
