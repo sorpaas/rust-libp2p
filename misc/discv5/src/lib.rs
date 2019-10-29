@@ -49,7 +49,7 @@
 //!   // generate a key for the node
 //!   let keypair = Keypair::generate_secp256k1();
 //!   // construct a local ENR
-//!   let enr = EnrBuilder::new()
+//!   let enr = EnrBuilder::new("v4")
 //!        .ip("127.0.0.1".parse::<Ipv4Addr>().expect("valid address").into())
 //!        .udp(9000)
 //!        .build(&keypair)

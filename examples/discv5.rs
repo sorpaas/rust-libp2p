@@ -12,7 +12,9 @@
 //! A single instance listening on a udp socket `0.0.0.0:9000` (with an ENR IP address of
 //! 127.0.0.1) can be created via:
 //!
-//! ```sh cargo run --example discv5 ```
+//! ```
+//! sh cargo run --example discv5
+//! ```
 //!
 //! This will display the created ENR record for the node.
 //!
@@ -20,9 +22,11 @@
 //! passed as command line options. Therefore, a second instance, in a new terminal, can be run on
 //! port 9001 and connected to the first via:
 //!
-//! ```sh cargo run --example discv5 -- 127.0.0.1 9001 <Base64-ENR> ```
+//! ```
+//! sh cargo run --example discv5 -- 127.0.0.1 9001 <BASE64_ENR> <GENERATE_KEY> 
+//! ```
 //!
-//! where `<Base64-ENR>` is the base64 ENR given from executing the first node. These steps can be
+//! where `<BASE64_ENR>` is the base64 ENR given from executing the first node and `<GENERATE_KEY>` is a boolean (`true` or `false`) specifying if new key should be generated. These steps can be
 //! repeated to add further nodes to the network.
 
 use futures::prelude::*;
@@ -51,10 +55,22 @@ fn main() {
         }
     };
 
-    // generate a key for the node
-    let keypair = identity::Keypair::generate_secp256k1();
+    // use a fixed key
+    let raw_key = vec![
+        183, 28, 113, 166, 126, 17, 119, 173, 78, 144, 22, 149, 225, 180, 185, 238, 23, 174, 22,
+        198, 102, 141, 49, 62, 172, 47, 150, 219, 205, 163, 242, 145,
+    ];
+        let secret_key = identity::secp256k1::SecretKey::from_bytes(raw_key).unwrap();
+        let mut keypair = identity::Keypair::Secp256k1(identity::secp256k1::Keypair::from(secret_key));
+
+    if let Some(generate_key) = std::env::args().nth(4) {
+        if generate_key.parse::<bool>().unwrap() { 
+            keypair = identity::Keypair::generate_secp256k1();
+        }
+    }
+
     // construct a local ENR
-    let enr = libp2p::enr::EnrBuilder::new()
+    let enr = libp2p::enr::EnrBuilder::new("v4")
         .ip(address.into())
         .udp(port)
         .build(&keypair)
@@ -77,12 +93,13 @@ fn main() {
 
     // if we know of another peer's ENR, add it known peers
     if let Some(base64_enr) = std::env::args().nth(3) {
-        if let Ok(enr) = base64_enr.parse::<libp2p::enr::Enr>() {
-            swarm.add_enr(enr);
-        } else {
-            panic!("Decoding ENR failed");
+        match base64_enr.parse::<libp2p::enr::Enr>() {
+            Ok(enr) => swarm.add_enr(enr),
+            Err(e) => panic!("Decoding ENR failed: {}", e),
         }
     }
+    let target_random_node_id = libp2p::enr::NodeId::random();
+    swarm.find_node(target_random_node_id);
 
     // construct a 30 second interval to search for new peers.
     let mut query_interval = tokio::timer::Interval::new_interval(Duration::from_secs(30));

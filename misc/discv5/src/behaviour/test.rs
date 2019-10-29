@@ -3,12 +3,10 @@
 use crate::{Discv5, Discv5Event};
 use env_logger;
 use libp2p_core::{
-    identity,
-    muxing::StreamMuxerBox,
-    nodes::Substream,
-    transport::{boxed::Boxed, MemoryTransport},
-    upgrade, PeerId, Swarm, Transport,
+    identity, muxing::StreamMuxerBox, nodes::Substream, transport::boxed::Boxed,
+    transport::MemoryTransport, PeerId, Transport,
 };
+use libp2p_swarm::Swarm;
 use tokio::prelude::*;
 
 use crate::kbucket;
@@ -18,8 +16,8 @@ use libp2p_secio::SecioConfig;
 use libp2p_yamux as yamux;
 use std::io;
 use std::net::IpAddr;
-
-use tokio::runtime::Runtime;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 type SwarmType =
     Swarm<Boxed<(PeerId, StreamMuxerBox), io::Error>, Discv5<Substream<StreamMuxerBox>>>;
@@ -35,20 +33,17 @@ fn build_swarms(n: usize) -> Vec<SwarmType> {
 
     for port in base_port..base_port + n as u16 {
         let keypair = identity::Keypair::generate_secp256k1();
-        let enr = EnrBuilder::new()
+        let enr = EnrBuilder::new("v4")
             .ip(ip.clone().into())
             .udp(port)
             .build(&keypair)
             .unwrap();
-        // unused transport for building a swarm
+        // transport for building a swarm
         let transport = MemoryTransport::default()
-            .with_upgrade(SecioConfig::new(keypair.clone()))
-            .and_then(move |out, endpoint| {
-                let peer_id = out.remote_key.into_peer_id();
-                let yamux = yamux::Config::default();
-                upgrade::apply(out.stream, yamux, endpoint)
-                    .map(|muxer| (peer_id, StreamMuxerBox::new(muxer)))
-            })
+            .upgrade(libp2p_core::upgrade::Version::V1)
+            .authenticate(SecioConfig::new(keypair.clone()))
+            .multiplex(yamux::Config::default())
+            .map(|(p, m), _| (p, StreamMuxerBox::new(m)))
             .map_err(|e| panic!("Failed to create transport: {:?}", e))
             .boxed();
         let discv5 = Discv5::new(enr, keypair.clone(), ip.into()).unwrap();
@@ -95,9 +90,11 @@ fn test_findnode_query() {
         .take(node_num - 1)
         .collect();
 
-    Runtime::new()
-        .unwrap()
-        .block_on(future::poll_fn(move || -> Result<_, io::Error> {
+    let test_result = Arc::new(Mutex::new(true));
+    let thread_result = test_result.clone();
+
+    tokio::run(
+        future::poll_fn(move || -> Result<_, io::Error> {
             for swarm in swarms.iter_mut() {
                 loop {
                     match swarm.poll().unwrap() {
@@ -120,6 +117,11 @@ fn test_findnode_query() {
                 }
             }
             Ok(Async::NotReady)
-        }))
-        .unwrap();
+        })
+        .timeout(Duration::from_millis(500))
+        .map_err(move |_| *thread_result.lock().unwrap() = false)
+        .map(|_| ()),
+    );
+
+    assert!(*test_result.lock().unwrap());
 }

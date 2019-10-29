@@ -34,7 +34,7 @@ use libp2p_core::{
     nodes::Substream,
     multiaddr::{Protocol, multiaddr},
     muxing::StreamMuxerBox,
-    upgrade,
+    upgrade
 };
 use libp2p_secio::SecioConfig;
 use libp2p_swarm::Swarm;
@@ -61,18 +61,13 @@ fn build_nodes_with_config(num: usize, cfg: KademliaConfig) -> (u64, Vec<TestSwa
     let mut result: Vec<Swarm<_, _>> = Vec::with_capacity(num);
 
     for _ in 0 .. num {
-        // TODO: make creating the transport more elegant ; literaly half of the code of the test
-        //       is about creating the transport
         let local_key = identity::Keypair::generate_ed25519();
         let local_public_key = local_key.public();
         let transport = MemoryTransport::default()
-            .with_upgrade(SecioConfig::new(local_key))
-            .and_then(move |out, endpoint| {
-                let peer_id = out.remote_key.into_peer_id();
-                let yamux = yamux::Config::default();
-                upgrade::apply(out.stream, yamux, endpoint)
-                    .map(|muxer| (peer_id, StreamMuxerBox::new(muxer)))
-            })
+            .upgrade(upgrade::Version::V1)
+            .authenticate(SecioConfig::new(local_key))
+            .multiplex(yamux::Config::default())
+            .map(|(p, m), _| (p, StreamMuxerBox::new(m)))
             .map_err(|e| panic!("Failed to create transport: {:?}", e))
             .boxed();
 
@@ -626,5 +621,36 @@ fn add_provider() {
     }
 
     QuickCheck::new().tests(3).quickcheck(prop as fn(_,_))
+}
+
+/// User code should be able to start queries beyond the internal
+/// query limit for background jobs. Originally this even produced an
+/// arithmetic overflow, see https://github.com/libp2p/rust-libp2p/issues/1290.
+#[test]
+fn exceed_jobs_max_queries() {
+    let (_, mut swarms) = build_nodes(1);
+    let num = JOBS_MAX_QUERIES + 1;
+    for _ in 0 .. num {
+        swarms[0].bootstrap();
+    }
+
+    assert_eq!(swarms[0].queries.size(), num);
+
+    current_thread::run(
+        future::poll_fn(move || {
+            for _ in 0 .. num {
+                // There are no other nodes, so the queries finish instantly.
+                if let Ok(Async::Ready(Some(e))) = swarms[0].poll() {
+                    if let KademliaEvent::BootstrapResult(r) = e {
+                        assert!(r.is_ok(), "Unexpected error")
+                    } else {
+                        panic!("Unexpected event: {:?}", e)
+                    }
+                } else {
+                    panic!("Expected event")
+                }
+            }
+            Ok(Async::Ready(()))
+        }))
 }
 

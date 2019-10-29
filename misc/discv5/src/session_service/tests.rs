@@ -1,10 +1,11 @@
 #![cfg(test)]
 use super::*;
-use crate::rpc::{Request, RpcType};
+use crate::rpc::{Request, Response, RpcType};
 use enr::EnrBuilder;
 use libp2p_core::identity::Keypair;
 use std::net::IpAddr;
 use tokio::prelude::*;
+use std::sync::{Arc,Mutex};
 
 fn init() {
     let _ = env_logger::builder().is_test(true).try_init();
@@ -20,12 +21,12 @@ fn simple_session_message() {
     let keypair = Keypair::generate_secp256k1();
     let keypair_2 = Keypair::generate_secp256k1();
 
-    let sender_enr = EnrBuilder::new()
+    let sender_enr = EnrBuilder::new("v4")
         .ip(ip)
         .udp(sender_port)
         .build(&keypair)
         .unwrap();
-    let receiver_enr = EnrBuilder::new()
+    let receiver_enr = EnrBuilder::new("v4")
         .ip(ip)
         .udp(receiver_port)
         .build(&keypair_2)
@@ -82,12 +83,16 @@ fn simple_session_message() {
         }
     });
 
+    let test_result = Arc::new(Mutex::new(true));
+    let thread_result = test_result.clone();
     tokio::run(
         sender
-            .select(receiver)
-            .map_err(|_| panic!("failed"))
+            .select(receiver).timeout(Duration::from_millis(100))
+            .map_err(move |_| 
+                     *thread_result.lock().unwrap() = false)
             .map(|_| ()),
     );
+    assert!(*test_result.lock().unwrap());
 }
 
 #[test]
@@ -99,12 +104,12 @@ fn multiple_messages() {
     let keypair = Keypair::generate_secp256k1();
     let keypair_2 = Keypair::generate_secp256k1();
 
-    let sender_enr = EnrBuilder::new()
+    let sender_enr = EnrBuilder::new("v4")
         .ip(ip)
         .udp(sender_port)
         .build(&keypair)
         .unwrap();
-    let receiver_enr = EnrBuilder::new()
+    let receiver_enr = EnrBuilder::new("v4")
         .ip(ip)
         .udp(receiver_port)
         .build(&keypair_2)
@@ -118,6 +123,11 @@ fn multiple_messages() {
     let send_message = ProtocolMessage {
         id: 1,
         body: RpcType::Request(Request::Ping { enr_seq: 1 }),
+    };
+
+    let pong_response = ProtocolMessage {
+        id: 1,
+        body: RpcType::Response(Response::Ping { enr_seq: 1, ip: ip, port: sender_port }),
     };
 
     let receiver_send_message = send_message.clone();
@@ -161,6 +171,8 @@ fn multiple_messages() {
                 SessionEvent::Message { message, .. } => {
                     assert_eq!(*message, receiver_send_message);
                     message_count += 1;
+                    // required to send a pong response to establish the session
+                    let _ = receiver_service.send_request(&sender_enr, pong_response.clone()); 
                     if message_count == messages_to_send {
                         return Ok(Async::Ready(()));
                     }
@@ -170,10 +182,14 @@ fn multiple_messages() {
         }
     });
 
+    let test_result = Arc::new(Mutex::new(true));
+    let thread_result = test_result.clone();
     tokio::run(
         sender
-            .select(receiver)
-            .map_err(|_| panic!("failed"))
+            .select(receiver).timeout(Duration::from_millis(100))
+            .map_err(move |_| 
+                     *thread_result.lock().unwrap() = false)
             .map(|_| ()),
     );
+    assert!(*test_result.lock().unwrap());
 }

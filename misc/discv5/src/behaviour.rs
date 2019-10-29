@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::{marker::PhantomData, time::Duration};
-use tokio::timer::Interval;
+use tokio_timer::Interval;
 use tokio_io::{AsyncRead, AsyncWrite};
 
 mod ip_vote;
@@ -319,13 +319,19 @@ impl<TSubstream> Discv5<TSubstream> {
                     }
 
                     // check if we need to request a new ENR
-                    if let Some(enr) = self.find_enr(&node_id) {
-                        if enr.seq() < enr_seq {
-                            // request an ENR update
-                            debug!("Requesting an ENR update from node: {}", node_id);
-                            let req = rpc::Request::FindNode { distance: 0 };
-                            self.send_rpc_request(&node_id, req, None);
+                    let enr = self.find_enr(&node_id);
+
+                    match enr {
+                        Some(enr) => {
+                            if enr.seq() < enr_seq {
+                                // request an ENR update
+                                debug!("Requesting an ENR update from node: {}", node_id);
+                                let req = rpc::Request::FindNode { distance: 0 };
+                                self.send_rpc_request(&node_id, req, None);
+                            }
+                            self.connection_updated(node_id.clone(), None, NodeStatus::Connected)
                         }
+                        None => (),
                     }
                 }
                 _ => {} //TODO: Implement all RPC methods
@@ -411,14 +417,18 @@ impl<TSubstream> Discv5<TSubstream> {
             let mut rpc_index = 0;
             to_send_nodes.push(Vec::new());
             for entry in nodes.into_iter() {
-                if entry.node.value.size() + total_size < MAX_PACKET_SIZE - 80 {
-                    total_size += entry.node.value.size();
+                let entry_size = entry.node.value.clone().encode().len();
+                // Responses assume that a session is established. Thus, on top of the encoded
+                // ENR's the packet should be a regular message. A regular message has a tag (32
+                // bytes), and auth_tag (12 bytes) and the NODES response has an ID (8 bytes) and a total (8 bytes). The encryption adds the HMAC (16 bytes) and can be at most 16 bytes larger so the total packet size can be at most 92 (given AES_GCM).
+                if entry_size + total_size < MAX_PACKET_SIZE - 92 {
+                    total_size += entry_size;
                     trace!("Adding ENR, Valid? : {}", entry.node.value.verify());
                     trace!("Enr: {}", entry.node.value.clone());
                     trace!("Enr: {:?}", entry.node.value.clone());
                     to_send_nodes[rpc_index].push(entry.node.value.clone());
                 } else {
-                    total_size = entry.node.value.size();
+                    total_size = entry_size;
                     to_send_nodes.push(vec![entry.node.value.clone()]);
                     rpc_index += 1;
                 }
@@ -774,12 +784,6 @@ where
         >,
     > {
         loop {
-            // Drain queued events
-            if !self.events.is_empty() {
-                return Async::Ready(NetworkBehaviourAction::GenerateEvent(self.events.remove(0)));
-            }
-            self.events.shrink_to_fit();
-
             // Process events from the session service
             while let Async::Ready(event) = self.service.poll() {
                 match event {
@@ -823,6 +827,12 @@ where
                     }
                 }
             }
+
+            // Drain queued events
+            if !self.events.is_empty() {
+                return Async::Ready(NetworkBehaviourAction::GenerateEvent(self.events.remove(0)));
+            }
+            self.events.shrink_to_fit();
 
             // Drain applied pending entries from the routing table.
             if let Some(entry) = self.kbuckets.take_applied_pending() {
@@ -923,4 +933,57 @@ pub enum Discv5Event {
         /// List of peers ordered from closest to furthest away.
         closer_peers: Vec<PeerId>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use enr::EnrBuilder;
+    use libp2p_core::identity;
+
+    #[test]
+    fn test_updating_connection_on_ping() {
+        let keypair = identity::Keypair::generate_secp256k1();
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        let enr = EnrBuilder::new("v4")
+            .ip(ip.clone().into())
+            .udp(10001)
+            .build(&keypair)
+            .unwrap();
+        let ip2: IpAddr = "127.0.0.1".parse().unwrap();
+        let keypair2 = identity::Keypair::generate_secp256k1();
+        let enr2 = EnrBuilder::new("v4")
+            .ip(ip2.clone().into())
+            .udp(10002)
+            .build(&keypair2)
+            .unwrap();
+
+        // Set up discv5 with one disconnected node
+        let mut discv5: Discv5<Box<u64>> = Discv5::new(enr, keypair.clone(), ip.into()).unwrap();
+        discv5.add_enr(enr2.clone());
+        discv5.connection_updated(enr2.node_id().clone(), None, NodeStatus::Disconnected);
+
+        let mut buckets = discv5.kbuckets.clone();
+        let mut node = buckets.iter().next().unwrap();
+        assert_eq!(node.status, NodeStatus::Disconnected);
+
+        // Add a fake request
+        let ping_response = rpc::Response::Ping {
+            enr_seq: 2,
+            ip: ip2,
+            port: 10002,
+        };
+        let ping_request = rpc::Request::Ping { enr_seq: 2 };
+        let req = RpcRequest(2, enr2.node_id().clone());
+        discv5
+            .active_rpc_requests
+            .insert(req, (Some(1), ping_request.clone()));
+
+        // Handle the ping and expect the disconnected Node to become connected
+        discv5.handle_rpc_response(enr2.node_id().clone(), 2, ping_response);
+        buckets = discv5.kbuckets.clone();
+
+        node = buckets.iter().next().unwrap();
+        assert_eq!(node.status, NodeStatus::Connected);
+    }
 }

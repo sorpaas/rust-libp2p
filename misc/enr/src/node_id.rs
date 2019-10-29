@@ -2,7 +2,6 @@
 //! this is the uncompressed encoded form of the public key).
 
 use crate::enr_keypair::EnrPublicKey;
-use hex;
 use libp2p_core::identity::PublicKey;
 use sha3::{Digest, Keccak256};
 
@@ -14,11 +13,19 @@ pub struct NodeId {
 }
 
 impl NodeId {
-    pub fn new(raw_input: &[u8]) -> Self {
+    pub fn new(raw_input: &[u8; 32]) -> Self {
+        NodeId { raw: raw_input.clone() }
+    }
+
+    pub fn parse(raw_input: &[u8]) -> Result<Self, &'static str> {
+        if raw_input.len() > 32 {
+            return Err("Input too large");
+        }
+
         let mut raw: RawNodeId = [0u8; 32];
         raw[..std::cmp::min(32, raw_input.len())].copy_from_slice(raw_input);
 
-        NodeId { raw }
+        Ok(NodeId { raw })
     }
 
     pub fn random() -> Self {
@@ -38,7 +45,7 @@ impl NodeId {
 impl From<PublicKey> for NodeId {
     fn from(public_key: PublicKey) -> Self {
         let pubkey_bytes = EnrPublicKey::from(public_key.clone()).encode_uncompressed();
-        NodeId::new(&Keccak256::digest(&pubkey_bytes))
+        NodeId::parse(&Keccak256::digest(&pubkey_bytes)).expect("must be the correct length")
     }
 }
 
