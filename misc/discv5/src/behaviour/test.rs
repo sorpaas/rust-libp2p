@@ -27,8 +27,7 @@ fn init() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
 
-fn build_swarms(n: usize) -> Vec<SwarmType> {
-    let base_port = 10000u16;
+fn build_swarms(n: usize, base_port: u16) -> Vec<SwarmType> {
     let mut swarms = Vec::new();
     let ip: IpAddr = "127.0.0.1".parse().unwrap();
 
@@ -191,7 +190,7 @@ fn test_findnode_query() {
     init();
     // build a collection of 8 nodes
     let node_num = 8;
-    let mut swarms = build_swarms(node_num);
+    let mut swarms = build_swarms(node_num, 30000);
     let node_enrs: Vec<Enr> = swarms.iter().map(|n| n.local_enr().clone()).collect();
 
     // link the nodes together
