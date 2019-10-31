@@ -35,8 +35,8 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::{marker::PhantomData, time::Duration};
-use tokio_timer::Interval;
 use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_timer::Interval;
 
 mod ip_vote;
 mod query_info;
@@ -67,7 +67,7 @@ pub struct Discv5<TSubstream> {
     active_rpc_requests: FnvHashMap<RpcRequest, (Option<QueryId>, rpc::Request)>,
 
     /// Keeps track of the number of responses received from a NODES response.
-    active_nodes_responses: HashMap<NodeId, usize>,
+    active_nodes_responses: HashMap<NodeId, NodesResponse>,
 
     /// A map of votes nodes have made about our external IP address. We accept the majority.
     ip_votes: IpVote,
@@ -89,6 +89,24 @@ pub struct Discv5<TSubstream> {
 
     /// Marker to pin the generics.
     marker: PhantomData<TSubstream>,
+}
+
+/// For multiple responses to a FindNodes request, this struct keeps track of the request count
+/// and the nodes that have been received.
+struct NodesResponse {
+    /// The response count.
+    count: usize,
+    /// The filtered nodes that have been received.
+    received_nodes: Vec<Enr>,
+}
+
+impl Default for NodesResponse {
+    fn default() -> Self {
+        NodesResponse {
+            count: 1,
+            received_nodes: Vec::new(),
+        }
+    }
 }
 
 impl<TSubstream> Discv5<TSubstream> {
@@ -265,24 +283,12 @@ impl<TSubstream> Discv5<TSubstream> {
             }
             match res {
                 rpc::Response::Nodes { total, mut nodes } => {
-                    if let Some(id) = query_id {
-                        let mut current_response = self
-                            .active_nodes_responses
-                            .remove(&node_id)
-                            .unwrap_or_else(|| 1);
-                        // Currently a maximum of 16 peers can be returned. Datagrams have a max
-                        // size of 1280 and ENR's have a max size of 300 bytes. There should be no
-                        // more than 5 responses, to return 16 peers.
-                        if total < 5 && (current_response as u64) < total {
-                            current_response += 1;
-                            self.active_rpc_requests
-                                .insert(req, (Some(id), request.clone()));
-                            self.active_nodes_responses
-                                .insert(node_id.clone(), current_response);
-                        } else {
-                            self.active_nodes_responses.remove(&node_id);
-                        }
-                    } // the following logic also applies to ENR updates (those not attached to a query).
+                    // Currently a maximum of 16 peers can be returned. Datagrams have a max
+                    // size of 1280 and ENR's have a max size of 300 bytes. There should be no
+                    // more than 5 responses, to return 16 peers.
+                    if total > 5 {
+                        warn!("NodesResponse has a total larger than 5, nodes will be truncated");
+                    }
 
                     // filter out any nodes that are not of the correct distance
                     // TODO: If a swarm peer reputation is built - downvote the peer if all
@@ -305,6 +311,39 @@ impl<TSubstream> Discv5<TSubstream> {
                                 .is_none()
                         });
                     }
+
+                    // handle the case that there is more than one response
+                    if total > 1 {
+                        let mut current_response = self
+                            .active_nodes_responses
+                            .remove(&node_id)
+                            .unwrap_or_else(|| Default::default());
+
+                        // if there are more requests coming, store the nodes and wait for
+                        // another response
+                        if current_response.count < 5 && (current_response.count as u64) < total {
+                            current_response.count += 1;
+
+                            current_response.received_nodes.append(&mut nodes);
+                            self.active_rpc_requests
+                                .insert(req, (query_id, request.clone()));
+                            self.active_nodes_responses
+                                .insert(node_id.clone(), current_response);
+                            return;
+                        }
+
+                        // have received all the Nodes responses we are willing to accept
+                        // ignore duplicates here as they will be handled when adding
+                        // to the DHT
+                        current_response.received_nodes.append(&mut nodes);
+                        nodes = current_response.received_nodes;
+                    }
+                    // note: If a client sends an initial NODES response with a total > 1 then
+                    // in a later response sends a response with a total of 1, all previous nodes
+                    // will be ignored.
+                    // ensure any mapping is removed in this rare case
+                    self.active_nodes_responses.remove(&node_id);
+
                     self.discovered(&node_id, nodes, query_id);
                 }
                 rpc::Response::Ping { enr_seq, ip, port } => {
@@ -703,13 +742,40 @@ impl<TSubstream> Discv5<TSubstream> {
     fn rpc_failure(&mut self, node_id: NodeId, failed_rpc_id: RpcId) {
         let req = RpcRequest(failed_rpc_id, node_id.clone());
 
-        if let Some((Some(query_id), _)) = self.active_rpc_requests.get(&req) {
-            if let Some(query) = self.active_queries.get_mut(&query_id) {
-                query.on_failure(&node_id);
+        if let Some((query_id_option, request)) = self.active_rpc_requests.remove(&req) {
+            match request {
+                // if a failed FindNodes request, ensure we haven't partially received packets. If
+                // so, process the partially found nodes
+                rpc::Request::FindNode { .. } => {
+                    if let Some(nodes_response) = self.active_nodes_responses.remove(&node_id) {
+                        if !nodes_response.received_nodes.is_empty() {
+                            warn!(
+                                "NODES Response failed, but was partially processed from Node: {}",
+                                node_id
+                            );
+                            // if it's a query mark it as success, to process the partial
+                            // collection of peers
+                            self.discovered(
+                                &node_id,
+                                nodes_response.received_nodes,
+                                query_id_option,
+                            );
+                        }
+                    }
+                }
+                // for all other requests, if any are queries, mark them as failures.
+                _ => {
+                    warn!("RPC Request: {:?} failed for node: {}", request, node_id);
+                    if let Some(query_id) = query_id_option {
+                        if let Some(query) = self.active_queries.get_mut(&query_id) {
+                            query.on_failure(&node_id);
+                        }
+                    }
+                }
             }
         }
 
-        // report the nodie as being disconnected.
+        // report the node as being disconnected
         debug!("Session dropped with Node: {}", node_id);
         self.connection_updated(node_id.clone(), None, NodeStatus::Disconnected);
         self.connected_peers.remove(&node_id);
