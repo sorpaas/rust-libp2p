@@ -209,12 +209,10 @@ impl ProtocolMessage {
                     if nodes.is_empty() {
                         s.begin_list(0);
                     } else {
-                        let mut r = RlpStream::new();
-                        r.begin_list(nodes.len());
+                        s.begin_list(nodes.len());
                         for node in nodes {
-                            r.append(&node.encode());
+                            s.append(&node);
                         }
-                        s.append(&r.drain());
                     }
                     buf.extend_from_slice(&s.drain());
                     buf
@@ -335,17 +333,8 @@ impl ProtocolMessage {
                         // no records
                         vec![]
                     } else {
-                        let rlp_enr_bytes = enr_list_rlp.as_val::<Vec<u8>>()?;
-                        let rlp_enr_list = rlp::Rlp::new(&rlp_enr_bytes);
-                        let enr_list = rlp_enr_list.as_list::<Vec<u8>>()?;
-
-                        let mut nodes = vec![];
-                        for enr in enr_list.into_iter() {
-                            nodes.push(rlp::decode::<Enr>(&enr).map_err(|_| {
-                                DecoderError::Custom("Invalid ENR in FindNodes response list")
-                            })?);
-                        }
-                        nodes
+                        let enr_list = enr_list_rlp.as_list::<Enr>()?;
+                        enr_list
                     }
                 };
                 RpcType::Response(Response::Nodes {
@@ -560,6 +549,22 @@ mod tests {
     }
 
     #[test]
+    fn ref_test_encode_response_nodes_empty() {
+        // reference input
+        let id = 1;
+        let total = 1;
+
+        let body = RpcType::Response(Response::Nodes {
+            total,
+            nodes: vec![],
+        });
+        // expected hex output
+        let expected_output = hex::decode("04c30101c0").unwrap();
+        let protocol_msg = ProtocolMessage { id, body };
+        assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+    #[test]
     fn ref_test_encode_response_nodes() {
         // reference input
         let id = 1;
@@ -578,10 +583,9 @@ mod tests {
             nodes: vec![enr],
         });
         // expected hex output
-        let expected_output = hex::decode("04f87f0101b87bf879b877f875b8401ce2991c64993d7c84c29a00bdc871917551c7d330fca2dd0d69c706596dc655448f030b98a77d4001fd46ae0112ce26d613c5a6a02a81a6223cd0c4edaa53280182696482763489736563703235366b31a103ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138").unwrap();
+        let expected_output = hex::decode("04f87b0101f877f875b8401ce2991c64993d7c84c29a00bdc871917551c7d330fca2dd0d69c706596dc655448f030b98a77d4001fd46ae0112ce26d613c5a6a02a81a6223cd0c4edaa53280182696482763489736563703235366b31a103ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138").unwrap();
 
         let protocol_msg = ProtocolMessage { id, body };
-
         assert_eq!(protocol_msg.encode(), expected_output);
     }
 
@@ -589,7 +593,7 @@ mod tests {
     fn ref_test_encode_response_nodes_multiple() {
         // reference input
         let id = 1;
-        let total = 2;
+        let total = 1;
         let enr = "enr:-HW4QBzimRxkmT18hMKaAL3IcZF1UcfTMPyi3Q1pxwZZbcZVRI8DC5infUAB_UauARLOJtYTxaagKoGmIjzQxO2qUygBgmlkgnY0iXNlY3AyNTZrMaEDymNMrg1JrLQB2KTGtv6MVbcNEVv0AHacwUAPMljNMTg".parse::<Enr>().unwrap();
 
         let enr2 = "enr:-HW4QNfxw543Ypf4HXKXdYxkyzfcxcO-6p9X986WldfVpnVTQX1xlTnWrktEWUbeTZnmgOuAY_KUhbVV1Ft98WoYUBMBgmlkgnY0iXNlY3AyNTZrMaEDDiy3QkHAxPyOgWbxp5oF1bDdlYE6dLCUUp8xfVw50jU".parse::<Enr>().unwrap();
@@ -600,11 +604,30 @@ mod tests {
         });
 
         // expected hex output
-        let expected_output = hex::decode("04f8f80102b8f4f8f2b877f875b8401ce2991c64993d7c84c29a00bdc871917551c7d330fca2dd0d69c706596dc655448f030b98a77d4001fd46ae0112ce26d613c5a6a02a81a6223cd0c4edaa53280182696482763489736563703235366b31a103ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138b877f875b840d7f1c39e376297f81d7297758c64cb37dcc5c3beea9f57f7ce9695d7d5a67553417d719539d6ae4b445946de4d99e680eb8063f29485b555d45b7df16a1850130182696482763489736563703235366b31a1030e2cb74241c0c4fc8e8166f1a79a05d5b0dd95813a74b094529f317d5c39d235").unwrap();
+        let expected_output = hex::decode("04f8f20101f8eef875b8401ce2991c64993d7c84c29a00bdc871917551c7d330fca2dd0d69c706596dc655448f030b98a77d4001fd46ae0112ce26d613c5a6a02a81a6223cd0c4edaa53280182696482763489736563703235366b31a103ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138f875b840d7f1c39e376297f81d7297758c64cb37dcc5c3beea9f57f7ce9695d7d5a67553417d719539d6ae4b445946de4d99e680eb8063f29485b555d45b7df16a1850130182696482763489736563703235366b31a1030e2cb74241c0c4fc8e8166f1a79a05d5b0dd95813a74b094529f317d5c39d235").unwrap();
 
         let protocol_msg = ProtocolMessage { id, body };
 
         assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_decode_response_nodes_multiple() {
+        let input = hex::decode("04f8f20101f8eef875b8401ce2991c64993d7c84c29a00bdc871917551c7d330fca2dd0d69c706596dc655448f030b98a77d4001fd46ae0112ce26d613c5a6a02a81a6223cd0c4edaa53280182696482763489736563703235366b31a103ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138f875b840d7f1c39e376297f81d7297758c64cb37dcc5c3beea9f57f7ce9695d7d5a67553417d719539d6ae4b445946de4d99e680eb8063f29485b555d45b7df16a1850130182696482763489736563703235366b31a1030e2cb74241c0c4fc8e8166f1a79a05d5b0dd95813a74b094529f317d5c39d235").unwrap();
+
+        let expected_enr1 = "enr:-HW4QBzimRxkmT18hMKaAL3IcZF1UcfTMPyi3Q1pxwZZbcZVRI8DC5infUAB_UauARLOJtYTxaagKoGmIjzQxO2qUygBgmlkgnY0iXNlY3AyNTZrMaEDymNMrg1JrLQB2KTGtv6MVbcNEVv0AHacwUAPMljNMTg".parse::<Enr>().unwrap();
+        let expected_enr2 = "enr:-HW4QNfxw543Ypf4HXKXdYxkyzfcxcO-6p9X986WldfVpnVTQX1xlTnWrktEWUbeTZnmgOuAY_KUhbVV1Ft98WoYUBMBgmlkgnY0iXNlY3AyNTZrMaEDDiy3QkHAxPyOgWbxp5oF1bDdlYE6dLCUUp8xfVw50jU".parse::<Enr>().unwrap();
+
+        let decoded = ProtocolMessage::decode(input).unwrap();
+
+        match decoded.body {
+            RpcType::Response(Response::Nodes { total, nodes }) => {
+                assert_eq!(total, 1);
+                assert_eq!(nodes[0], expected_enr1);
+                assert_eq!(nodes[1], expected_enr2);
+            }
+            _ => panic!("Invalid decoding"),
+        }
     }
 
     #[test]
