@@ -272,7 +272,8 @@ impl Enr {
             Some(ref id) if id == "v4" => {
                 enr_pubkey.verify_v4(&self.rlp_content(), &self.signature)
             }
-            _ => unimplemented!(),
+            // unsupported identity schemes
+            _ => false,
         }
     }
 
@@ -445,7 +446,8 @@ impl Enr {
                 Some(ref id) if id == "v4" => enr_keypair
                     .sign_v4(&self.rlp_content())
                     .map_err(|_| EnrError::SigningError)?,
-                _ => unimplemented!(),
+                // other identity schemes are unsupported
+                _ => return Err(EnrError::SigningError),
             }
         };
         Ok(())
@@ -621,7 +623,8 @@ impl EnrBuilder {
             "v4" => enr_keypair
                 .sign_v4(&self.rlp_content())
                 .map_err(|_| EnrError::SigningError),
-            _ => unimplemented!(),
+            // unsupported identity schemes
+            _ => Err(EnrError::SigningError),
         }
     }
 
