@@ -18,9 +18,9 @@ impl From<Keypair> for EnrKeypair {
 }
 
 impl EnrKeypair {
-    /// Perform  the ENR-specific signing.
+    /// Performs ENR-specific signing for the v4 identity scheme.
     // This can be modified as support for more keys are given.
-    pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, SigningError> {
+    pub fn sign_v4(&self, msg: &[u8]) -> Result<Vec<u8>, SigningError> {
         match self.inner {
             Keypair::Ed25519(ref keypair) => Ok(keypair.sign(msg)),
             Keypair::Rsa(ref pair) => pair.sign(msg).map_err(|e| e.into()),
@@ -29,9 +29,9 @@ impl EnrKeypair {
                 let hash = Keccak256::digest(msg);
                 let der_sig = pair.secret().sign_hash(&hash)?;
                 // convert to compact form
-                Ok(Signature::from_der(&der_sig)
+                Ok(Signature::parse_der(&der_sig)
                     .map_err(|_| SigningError::new(String::from("Incorrect DER format")))?
-                    .serialize_compact()
+                    .serialize()
                     .to_vec())
             }
         }
@@ -68,8 +68,8 @@ impl Into<String> for EnrPublicKey {
 }
 
 impl EnrPublicKey {
-    /// Verify a raw message, given a public key.
-    pub fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
+    /// Verify a raw message, given a public key for the v4 identity scheme.
+    pub fn verify_v4(&self, msg: &[u8], sig: &[u8]) -> bool {
         // take the keccak hash
         match &self.inner {
             PublicKey::Ed25519(pk) => pk.verify(&msg, sig),
@@ -77,8 +77,8 @@ impl EnrPublicKey {
             PublicKey::Secp256k1(pk) => {
                 // convert a compact encoded signature to a 256 bit DER-encoded signature
                 let msg = Keccak256::digest(msg);
-                if let Ok(sig) = Signature::from_compact(sig).and_then(|s| Ok(s.serialize_der())) {
-                    return pk.verify_hash(&msg, &sig);
+                if let Ok(sig) = Signature::parse_slice(sig).map(|s| s.serialize_der()) {
+                    return pk.verify_hash(&msg, sig.as_ref());
                 }
                 false
             }
@@ -98,7 +98,9 @@ impl EnrPublicKey {
         match &self.inner {
             PublicKey::Ed25519(pk) => pk.encode().to_vec(),
             PublicKey::Rsa(pk) => pk.encode_x509(),
-            PublicKey::Secp256k1(pk) => pk.encode_uncompressed().to_vec(),
+            // Note: The current libsecp256k1 library prefixes the uncompressed output with a byte
+            // indicating the type of output. We ignore it here
+            PublicKey::Secp256k1(pk) => pk.encode_uncompressed()[1..].to_vec(),
         }
     }
 }

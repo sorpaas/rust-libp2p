@@ -56,7 +56,6 @@ impl Discv5Service {
                 }
                 Ok(Async::NotReady) => {
                     // didn't write add back and break
-                    debug!("Couldn't write to UDP socket");
                     self.send_queue.insert(0, (dst, packet));
                     // notify to try again
                     task::current().notify();
@@ -77,7 +76,7 @@ impl Discv5Service {
                         Ok(p) => {
                             return Async::Ready((src, p));
                         }
-                        Err(_) => {} // could not decode the packet, drop it
+                        Err(e) => debug!("Could not decode packet: {:?}", e), // could not decode the packet, drop it
                     }
                 }
                 Ok(Async::NotReady) => {

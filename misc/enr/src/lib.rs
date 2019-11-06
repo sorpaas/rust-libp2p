@@ -1,17 +1,19 @@
 //! # Ethereum Node Record (ENR)
 //!
-//! This crate contains an implementation of an Ethereum Node Record (ENR) as specified by [EIP-778](https://eips.ethereum.org/EIPS/eip-778) extended to allow for the use of a range of public key types.
+//! This crate contains an implementation of an Ethereum Node Record (ENR) as specified by
+//! [EIP-778](https://eips.ethereum.org/EIPS/eip-778) extended to allow for the use of a range of
+//! public key types.
 //!
 //! An ENR is a signed, key-value record which as an associated `NodeId` (a 32-byte identifier).
-//! Updating/modifying an ENR requires a libp2p [`Keypair`] in order to re-sign the record with
-//! the associated key-pair. This implementation builds uses [`EnrKeypair`] as a wrapper around
-//! the libp2p [`Keypair`] in order to perform ENR-specific sign/verify functions.
+//! Updating/modifying an ENR requires a libp2p [`Keypair`] in order to re-sign the record with the
+//! associated key-pair. This implementation builds uses [`EnrKeypair`] as a wrapper around the
+//! libp2p [`Keypair`] in order to perform ENR-specific sign/verify functions.
 //!
 //! ENR's are identified by their sequence number. When updating an ENR, the sequence number is
 //! increased.
 //!
-//! This implementation also keeps the `rlp_encoding` of it's content, to ensure the ordering of the
-//! keys when encoded/decoded.
+//! Different identity schemes can be used to define the node id and signatures. Currently only the
+//! "v4" identity is supported and is set by default.
 //!
 //! # Example
 //!
@@ -26,12 +28,11 @@
 //!
 //! let key = Keypair::generate_secp256k1();
 //! let ip = Ipv4Addr::new(192,168,0,1);
-//! let enr = EnrBuilder::new().ip(ip.into()).tcp(8000).id("v5").build(&key).unwrap();
+//! let enr = EnrBuilder::new("v4").ip(ip.into()).tcp(8000).build(&key).unwrap();
 //!
-//! assert_eq!(enr.multiaddr()[0],
-//!     "/ip4/192.168.0.1/tcp/8000".parse().unwrap());
+//! assert_eq!(enr.multiaddr()[0], "/ip4/192.168.0.1/tcp/8000".parse().unwrap());
 //! assert_eq!(enr.ip(), Some("192.168.0.1".parse().unwrap()));
-//! assert_eq!(enr.id(), Some(String::from("v5")));
+//! assert_eq!(enr.id(), Some("v4".into()));
 //! ```
 //!
 //! [`Keypair`]: libp2p_core::identity::Keypair
@@ -45,14 +46,14 @@ mod node_id;
 
 use crate::enr_keypair::{EnrKeypair, EnrPublicKey};
 use base64;
-use indexmap::IndexMap;
 use libp2p_core::identity::{ed25519, Keypair, PublicKey};
 use log::debug;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
+use std::collections::BTreeMap;
 
 #[cfg(feature = "serde")]
 use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
 use libp2p_core::{
@@ -76,9 +77,9 @@ pub struct Enr {
     /// The `NodeId` of the ENR record.
     node_id: NodeId,
 
-    /// Key-value contents of the ENR. An IndexMap is used to preserve the order of keys, which is
+    /// Key-value contents of the ENR. A BTreeMap is used to get the keys in sorted order, which is
     /// important for verifying the signature of the ENR.
-    content: IndexMap<String, Vec<u8>>,
+    content: BTreeMap<String, Vec<u8>>,
 
     /// The signature of the ENR record, stored as bytes.
     signature: Vec<u8>,
@@ -102,8 +103,8 @@ impl Enr {
         self.seq
     }
 
-    /// Returns a list of multiaddrs if the ENR has an `ip` and either a `tcp` or `udp` key. The
-    /// vector remains empty if these fields are not defined.
+    /// Returns a list of multiaddrs if the ENR has an `ip` and either a `tcp` or `udp` key **or** an `ip6` and either a `tcp6` or `udp6`.
+    /// The vector remains empty if these fields are not defined.
     pub fn multiaddr(&self) -> Vec<Multiaddr> {
         let mut multiaddrs: Vec<Multiaddr> = Vec::new();
         if let Some(ip) = self.ip() {
@@ -119,22 +120,45 @@ impl Enr {
                 multiaddrs.push(multiaddr);
             }
         }
+        if let Some(ip6) = self.ip6() {
+            if let Some(udp6) = self.udp6() {
+                let mut multiaddr: Multiaddr = ip6.into();
+                multiaddr.push(Protocol::Udp(udp6));
+                multiaddrs.push(multiaddr);
+            }
+
+            if let Some(tcp6) = self.tcp6() {
+                let mut multiaddr: Multiaddr = ip6.into();
+                multiaddr.push(Protocol::Tcp(tcp6));
+                multiaddrs.push(multiaddr);
+            }
+        }
         multiaddrs
     }
 
-    /// Returns the IP address of the ENR record if it is defined.
-    pub fn ip(&self) -> Option<IpAddr> {
+    /// Returns the IPv4 address of the ENR record if it is defined.
+    pub fn ip(&self) -> Option<Ipv4Addr> {
         if let Some(ip_bytes) = self.content.get("ip") {
             return match ip_bytes.len() {
                 4 => {
                     let mut ip = [0u8; 4];
                     ip.copy_from_slice(ip_bytes);
-                    Some(IpAddr::from(ip))
+                    Some(Ipv4Addr::from(ip))
                 }
+                _ => None,
+            };
+        }
+        None
+    }
+
+    /// Returns the IPv6 address of the ENR record if it is defined.
+    pub fn ip6(&self) -> Option<Ipv6Addr> {
+        if let Some(ip_bytes) = self.content.get("ip6") {
+            return match ip_bytes.len() {
                 16 => {
                     let mut ip = [0u8; 16];
                     ip.copy_from_slice(ip_bytes);
-                    Some(IpAddr::from(ip))
+                    Some(Ipv6Addr::from(ip))
                 }
                 _ => None,
             };
@@ -162,9 +186,33 @@ impl Enr {
         None
     }
 
+    /// Returns the IPv6-specific TCP port of ENR record if it is defined.
+    pub fn tcp6(&self) -> Option<u16> {
+        if let Some(tcp_bytes) = self.content.get("tcp6") {
+            if tcp_bytes.len() <= 2 {
+                let mut tcp = [0u8; 2];
+                tcp[2 - tcp_bytes.len()..].copy_from_slice(tcp_bytes);
+                return Some(u16::from_be_bytes(tcp));
+            }
+        }
+        None
+    }
+
     /// Returns the UDP port of ENR record if it is defined.
     pub fn udp(&self) -> Option<u16> {
         if let Some(udp_bytes) = self.content.get("udp") {
+            if udp_bytes.len() <= 2 {
+                let mut udp = [0u8; 2];
+                udp[2 - udp_bytes.len()..].copy_from_slice(udp_bytes);
+                return Some(u16::from_be_bytes(udp));
+            }
+        }
+        None
+    }
+
+    /// Returns the IPv6-specific UDP port of ENR record if it is defined.
+    pub fn udp6(&self) -> Option<u16> {
+        if let Some(udp_bytes) = self.content.get("udp6") {
             if udp_bytes.len() <= 2 {
                 let mut udp = [0u8; 2];
                 udp[2 - udp_bytes.len()..].copy_from_slice(udp_bytes);
@@ -179,7 +227,12 @@ impl Enr {
     pub fn udp_socket(&self) -> Option<SocketAddr> {
         if let Some(ip) = self.ip() {
             if let Some(udp) = self.udp() {
-                return Some(SocketAddr::new(ip, udp));
+                return Some(SocketAddr::new(IpAddr::V4(ip), udp));
+            }
+        }
+        if let Some(ip6) = self.ip6() {
+            if let Some(udp6) = self.udp6() {
+                return Some(SocketAddr::new(IpAddr::V6(ip6), udp6));
             }
         }
         None
@@ -215,7 +268,12 @@ impl Enr {
     /// Verify the signature of the ENR record.
     pub fn verify(&self) -> bool {
         let enr_pubkey = EnrPublicKey::from(self.public_key());
-        return enr_pubkey.verify(&self.rlp_content(), &self.signature);
+        match self.id() {
+            Some(ref id) if id == "v4" => {
+                enr_pubkey.verify_v4(&self.rlp_content(), &self.signature)
+            }
+            _ => unimplemented!(),
+        }
     }
 
     /// RLP encodes the ENR into a byte array.
@@ -225,10 +283,11 @@ impl Enr {
         s.drain()
     }
 
-    /// Provides the URL-safe base64 encoded "text" version of the ENR.
+    /// Provides the URL-safe base64 encoded "text" version of the ENR prefixed by "enr:".
     pub fn to_base64(&self) -> String {
         let cloned_self = self.clone();
-        base64::encode_config(&cloned_self.encode(), base64::URL_SAFE)
+        let hex = base64::encode_config(&cloned_self.encode(), base64::URL_SAFE_NO_PAD);
+        format!("enr:{}", hex)
     }
 
     /// Returns the current size of the ENR.
@@ -243,10 +302,9 @@ impl Enr {
         self.seq = seq;
 
         let enr_keypair = EnrKeypair::from(keypair.clone());
-        // construct compact signature
-        self.signature = enr_keypair
-            .sign(&self.rlp_content())
-            .map_err(|_| EnrError::SigningError)?;
+
+        // sign the record
+        self.sign(enr_keypair)?;
 
         // update the node id
         self.node_id = NodeId::from(keypair.public());
@@ -267,6 +325,11 @@ impl Enr {
         value: Vec<u8>,
         keypair: &Keypair,
     ) -> Result<bool, EnrError> {
+        // currently only support "v4" identity schemes
+        if key == "id" && value != b"v4" {
+            return Err(EnrError::UnsupportedIdentityScheme);
+        }
+
         self.content.insert(key.into(), value);
         // add the new public key
         // convert the libp2p keypair into an EnrKeypair
@@ -280,10 +343,8 @@ impl Enr {
             .checked_add(1)
             .ok_or_else(|| EnrError::SequenceNumberTooHigh)?;
 
-        // construct compact signature
-        self.signature = enr_keypair
-            .sign(&self.rlp_content())
-            .map_err(|_| EnrError::SigningError)?;
+        // sign the record
+        self.sign(enr_keypair)?;
 
         // update the node id
         self.node_id = NodeId::from(keypair.public());
@@ -297,19 +358,26 @@ impl Enr {
     }
 
     pub fn set_ip(&mut self, ip: IpAddr, keypair: &Keypair) -> Result<bool, EnrError> {
-        let ip_bytes = match ip {
-            IpAddr::V4(addr) => addr.octets().to_vec(),
-            IpAddr::V6(addr) => addr.octets().to_vec(),
-        };
-        self.add_key("ip", ip_bytes, keypair)
+        match ip {
+            IpAddr::V4(addr) => self.add_key("ip", addr.octets().to_vec(), keypair),
+            IpAddr::V6(addr) => self.add_key("ip6", addr.octets().to_vec(), keypair),
+        }
     }
 
     pub fn set_udp(&mut self, udp: u16, keypair: &Keypair) -> Result<bool, EnrError> {
         self.add_key("udp", udp.to_be_bytes().to_vec(), keypair)
     }
 
+    pub fn set_udp6(&mut self, udp: u16, keypair: &Keypair) -> Result<bool, EnrError> {
+        self.add_key("udp6", udp.to_be_bytes().to_vec(), keypair)
+    }
+
     pub fn set_tcp(&mut self, tcp: u16, keypair: &Keypair) -> Result<bool, EnrError> {
         self.add_key("tcp", tcp.to_be_bytes().to_vec(), keypair)
+    }
+
+    pub fn set_tcp6(&mut self, tcp: u16, keypair: &Keypair) -> Result<bool, EnrError> {
+        self.add_key("tcp6", tcp.to_be_bytes().to_vec(), keypair)
     }
 
     /// Sets the ip and udp port in a single update with a single increment in sequence number.
@@ -318,14 +386,18 @@ impl Enr {
         socket: SocketAddr,
         keypair: &Keypair,
     ) -> Result<bool, EnrError> {
-        let ip_bytes = match socket.ip() {
-            IpAddr::V4(addr) => addr.octets().to_vec(),
-            IpAddr::V6(addr) => addr.octets().to_vec(),
+        match socket.ip() {
+            IpAddr::V4(addr) => {
+                self.content.insert("ip".into(), addr.octets().to_vec());
+                self.content
+                    .insert("udp".into(), socket.port().to_be_bytes().to_vec());
+            }
+            IpAddr::V6(addr) => {
+                self.content.insert("ip6".into(), addr.octets().to_vec());
+                self.content
+                    .insert("udp6".into(), socket.port().to_be_bytes().to_vec());
+            }
         };
-
-        self.content.insert("ip".into(), ip_bytes);
-        self.content
-            .insert("udp".into(), socket.port().to_be_bytes().to_vec());
 
         let enr_keypair = EnrKeypair::from(keypair.clone());
         let public_key = enr_keypair.public();
@@ -337,18 +409,11 @@ impl Enr {
             .checked_add(1)
             .ok_or_else(|| EnrError::SequenceNumberTooHigh)?;
 
-        // construct compact signature
-        self.signature = enr_keypair
-            .sign(&self.rlp_content())
-            .map_err(|_| EnrError::SigningError)?;
+        // sign the record
+        self.sign(enr_keypair)?;
 
         // update the node id
         self.node_id = NodeId::from(keypair.public());
-
-        // check the size of the record
-        if self.size() > MAX_ENR_SIZE {
-            return Err(EnrError::ExceedsMaxSize);
-        }
 
         Ok(true)
     }
@@ -372,6 +437,19 @@ impl Enr {
         }
         stream.drain()
     }
+
+    /// Signs the ENR record based on the identity scheme. Currently only "v4" is supported.
+    fn sign(&mut self, enr_keypair: EnrKeypair) -> Result<(), EnrError> {
+        self.signature = {
+            match self.id() {
+                Some(ref id) if id == "v4" => enr_keypair
+                    .sign_v4(&self.rlp_content())
+                    .map_err(|_| EnrError::SigningError)?,
+                _ => unimplemented!(),
+            }
+        };
+        Ok(())
+    }
 }
 
 // traits //
@@ -390,7 +468,7 @@ impl std::fmt::Display for Enr {
 
 impl std::fmt::Debug for Enr {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "ENR: {}", self.to_base64())
+        write!(f, "{}", self.to_base64())
     }
 }
 
@@ -399,8 +477,16 @@ impl FromStr for Enr {
     type Err = String;
 
     fn from_str(base64_string: &str) -> Result<Self, Self::Err> {
-        let bytes = base64::decode_config(base64_string, base64::URL_SAFE)
-            .map_err(|_| "Invalid base64 encoding")?;
+        if base64_string.len() < 4 {
+            return Err("Invalid ENR string".to_string());
+        }
+        // support both enr prefix and not
+        let mut decode_string = base64_string;
+        if &base64_string[..4] == "enr:" {
+            decode_string = &decode_string[4..];
+        }
+        let bytes = base64::decode_config(decode_string, base64::URL_SAFE_NO_PAD)
+            .map_err(|e| format!("Invalid base64 encoding: {:?}", e))?;
         rlp::decode::<Enr>(&bytes).map_err(|e| format!("Invalid ENR: {:?}", e))
     }
 }
@@ -426,21 +512,28 @@ impl<'de> Deserialize<'de> for Enr {
     }
 }
 
-/// This is the builder struct for generating ENR records.
+/// This is the builder struct for generating ENR records. Note this currently only supports the
+/// v4 identity scheme.
 pub struct EnrBuilder {
+    /// The identity scheme used to build the ENR record.
+    id: String,
+
     /// The starting sequence number for the ENR record.
     seq: u64,
 
     /// The key-value pairs for the ENR record.
-    content: IndexMap<String, Vec<u8>>,
+    content: BTreeMap<String, Vec<u8>>,
 }
 
 impl EnrBuilder {
     /// Constructs a minimal `EnrBuilder` providing only a sequence number.
-    pub fn new() -> Self {
+    /// Currently only supports the id v4 scheme and therefore disallows creation of any other
+    /// scheme.
+    pub fn new(id: impl Into<String>) -> Self {
         EnrBuilder {
+            id: id.into(),
             seq: 1,
-            content: IndexMap::new(),
+            content: BTreeMap::new(),
         }
     }
 
@@ -458,23 +551,29 @@ impl EnrBuilder {
 
     /// Adds an `ip` field to the `ENRBuilder`.
     pub fn ip(&mut self, ip: IpAddr) -> &mut Self {
-        let key = String::from("ip");
         match ip {
             IpAddr::V4(addr) => {
-                self.content.insert(key, addr.octets().to_vec());
+                self.content
+                    .insert(String::from("ip"), addr.octets().to_vec());
             }
             IpAddr::V6(addr) => {
-                self.content.insert(key, addr.octets().to_vec());
+                self.content
+                    .insert(String::from("ip6"), addr.octets().to_vec());
             }
         }
         self
     }
+
+    /*
+     * Removed from the builder as only the v4 scheme is currently supported.
+     * This is set as default in the builder.
 
     /// Adds an `Id` field to the `ENRBuilder`.
     pub fn id(&mut self, id: &str) -> &mut Self {
         self.content.insert("id".into(), id.as_bytes().to_vec());
         self
     }
+    */
 
     /// Adds a `tcp` field to the `ENRBuilder`.
     pub fn tcp(&mut self, tcp: u16) -> &mut Self {
@@ -483,10 +582,24 @@ impl EnrBuilder {
         self
     }
 
+    /// Adds a `tcp6` field to the `ENRBuilder`.
+    pub fn tcp6(&mut self, tcp: u16) -> &mut Self {
+        self.content
+            .insert("tcp6".into(), tcp.to_be_bytes().to_vec());
+        self
+    }
+
     /// Adds a `udp` field to the `ENRBuilder`.
     pub fn udp(&mut self, udp: u16) -> &mut Self {
         self.content
             .insert("udp".into(), udp.to_be_bytes().to_vec());
+        self
+    }
+
+    /// Adds a `udp` field to the `ENRBuilder`.
+    pub fn udp6(&mut self, udp: u16) -> &mut Self {
+        self.content
+            .insert("udp6".into(), udp.to_be_bytes().to_vec());
         self
     }
 
@@ -502,6 +615,16 @@ impl EnrBuilder {
         stream.drain()
     }
 
+    /// Signs record based on the identity scheme. Currently only "v4" is supported.
+    fn signature(&self, enr_keypair: EnrKeypair) -> Result<Vec<u8>, EnrError> {
+        match self.id.as_str() {
+            "v4" => enr_keypair
+                .sign_v4(&self.rlp_content())
+                .map_err(|_| EnrError::SigningError),
+            _ => unimplemented!(),
+        }
+    }
+
     /// Adds a public key to the ENR builder.
     fn add_public_key(&mut self, key: &EnrPublicKey) {
         self.add_value(key.clone().into(), key.encode());
@@ -509,14 +632,19 @@ impl EnrBuilder {
 
     /// Constructs an ENR from the ENRBuilder struct.
     pub fn build(&mut self, key: &Keypair) -> Result<Enr, EnrError> {
+        // add the identity scheme to the content
+        if self.id != "v4" {
+            return Err(EnrError::UnsupportedIdentityScheme);
+        }
+
+        self.content
+            .insert("id".into(), self.id.as_bytes().to_vec());
+
         let enr_key = EnrKeypair::from(key.clone());
         self.add_public_key(&enr_key.public());
         let rlp_content = self.rlp_content();
 
-        // construct compact signature
-        let signature = enr_key
-            .sign(&rlp_content)
-            .map_err(|_| EnrError::SigningError)?;
+        let signature = self.signature(enr_key)?;
 
         // check the size of the record
         if rlp_content.len() + signature.len() + 8 > MAX_ENR_SIZE {
@@ -575,12 +703,18 @@ impl Decodable for Enr {
         seq[8 - seq_bytes.len()..].copy_from_slice(&seq_bytes);
         let seq = u64::from_be_bytes(seq);
 
-        let mut content = IndexMap::new();
+        let mut content = BTreeMap::new();
+        let mut prev: Option<String> = None;
         for _ in 0..decoded_list.len() / 2 {
             let key = decoded_list.remove(0);
             let value = decoded_list.remove(0);
 
             let key = String::from_utf8_lossy(&key);
+            // TODO: add tests for this error case
+            if prev.is_some() && prev >= Some(key.to_string()) {
+                return Err(DecoderError::Custom("Unsorted keys"));
+            }
+            prev = Some(key.to_string());
             content.insert(key.to_string(), value);
         }
 
@@ -628,6 +762,7 @@ pub enum EnrError {
     ExceedsMaxSize,
     SequenceNumberTooHigh,
     SigningError,
+    UnsupportedIdentityScheme,
 }
 
 #[cfg(test)]
@@ -650,7 +785,7 @@ mod tests {
             _ => None,
         };
 
-        assert_eq!(enr.ip(), Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert_eq!(enr.ip(), Some(Ipv4Addr::new(127, 0, 0, 1)));
         assert_eq!(enr.id(), Some(String::from("v4")));
         assert_eq!(enr.udp(), Some(30303));
         assert_eq!(enr.tcp(), None);
@@ -660,16 +795,68 @@ mod tests {
     }
 
     #[test]
+    fn check_test_vector_2() {
+        let text = "enr:-IS4QHCYrYZbAKWCBRlAy5zzaDZXJBGkcnh4MHcBFZntXNFrdvJjX04jRzjzCBOonrkTfj499SZuOh8R33Ls8RRcy5wBgmlkgnY0gmlwhH8AAAGJc2VjcDI1NmsxoQPKY0yuDUmstAHYpMa2_oxVtw0RW_QAdpzBQA8yWM0xOIN1ZHCCdl8";
+        let signature = hex::decode("7098ad865b00a582051940cb9cf36836572411a47278783077011599ed5cd16b76f2635f4e234738f30813a89eb9137e3e3df5266e3a1f11df72ecf1145ccb9c").unwrap();
+        let expected_pubkey =
+            hex::decode("03ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138")
+                .unwrap();
+        let expected_node_id =
+            hex::decode("a448f24c6d18e575453db13171562b71999873db5b286df957af199ec94617f7")
+                .unwrap();
+
+        let enr: Enr = text.parse::<Enr>().unwrap();
+        let pubkey = match enr.public_key() {
+            PublicKey::Secp256k1(key) => Some(key.encode()),
+            _ => None,
+        };
+
+        assert_eq!(enr.ip(), Some(Ipv4Addr::new(127, 0, 0, 1)));
+        assert_eq!(enr.ip6(), None);
+        assert_eq!(enr.id(), Some(String::from("v4")));
+        assert_eq!(enr.udp(), Some(30303));
+        assert_eq!(enr.udp6(), None);
+        assert_eq!(enr.tcp(), None);
+        assert_eq!(enr.tcp6(), None);
+        assert_eq!(enr.signature(), &signature[..]);
+        assert_eq!(pubkey.unwrap().to_vec(), expected_pubkey);
+        assert_eq!(enr.node_id().raw().to_vec(), expected_node_id);
+
+        assert!(enr.verify());
+    }
+
+    #[test]
+    fn test_encode_test_vector_2() {
+        let secret_key = libp2p_core::identity::secp256k1::SecretKey::from_bytes(
+            hex::decode("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+                .unwrap(),
+        )
+        .unwrap();
+
+        let signature = hex::decode("7098ad865b00a582051940cb9cf36836572411a47278783077011599ed5cd16b76f2635f4e234738f30813a89eb9137e3e3df5266e3a1f11df72ecf1145ccb9c").unwrap();
+
+        let key = Keypair::Secp256k1(libp2p_core::identity::secp256k1::Keypair::from(secret_key));
+        let ip = Ipv4Addr::new(127, 0, 0, 1);
+        let udp = 30303;
+
+        let enr = {
+            let mut builder = EnrBuilder::new("v4");
+            builder.ip(ip.into());
+            builder.udp(udp);
+            builder.build(&key).unwrap()
+        };
+
+        assert_eq!(enr.signature(), &signature[..]);
+    }
+
+    #[test]
     fn test_encode_decode_secp256k1() {
         let key = Keypair::generate_secp256k1();
-
-        let id = "v5";
         let ip = Ipv4Addr::new(127, 0, 0, 1);
         let tcp = 3000;
 
         let enr = {
-            let mut builder = EnrBuilder::new();
-            builder.id(id);
+            let mut builder = EnrBuilder::new("v4");
             builder.ip(ip.into());
             builder.tcp(tcp);
             builder.build(&key).unwrap()
@@ -679,7 +866,7 @@ mod tests {
 
         let decoded_enr = rlp::decode::<Enr>(&encoded_enr).unwrap();
 
-        assert_eq!(decoded_enr.id(), Some(id.into()));
+        assert_eq!(decoded_enr.id(), Some("v4".into()));
         assert_eq!(decoded_enr.ip(), Some(ip.into()));
         assert_eq!(decoded_enr.tcp(), Some(tcp));
         // Must compare encoding as the public key itself can be different
@@ -693,14 +880,11 @@ mod tests {
     #[test]
     fn test_encode_decode_ed25519() {
         let key = Keypair::generate_ed25519();
-
-        let id = "v5";
         let ip = Ipv4Addr::new(10, 0, 0, 1);
         let tcp = 30303;
 
         let enr = {
-            let mut builder = EnrBuilder::new();
-            builder.id(id);
+            let mut builder = EnrBuilder::new("v4");
             builder.ip(ip.into());
             builder.tcp(tcp);
             builder.build(&key).unwrap()
@@ -709,7 +893,7 @@ mod tests {
         let encoded_enr = rlp::encode(&enr);
         let decoded_enr = rlp::decode::<Enr>(&encoded_enr).unwrap();
 
-        assert_eq!(decoded_enr.id(), Some(id.into()));
+        assert_eq!(decoded_enr.id(), Some("v4".into()));
         assert_eq!(decoded_enr.ip(), Some(ip.into()));
         assert_eq!(decoded_enr.tcp(), Some(tcp));
         assert_eq!(decoded_enr.public_key(), key.public());
@@ -719,13 +903,11 @@ mod tests {
     #[test]
     fn test_add_key() {
         let key = Keypair::generate_secp256k1();
-        let id = "v5";
         let ip = Ipv4Addr::new(10, 0, 0, 1);
         let tcp = 30303;
 
         let mut enr = {
-            let mut builder = EnrBuilder::new();
-            builder.id(id);
+            let mut builder = EnrBuilder::new("v4");
             builder.ip(ip.into());
             builder.tcp(tcp);
             builder.build(&key).unwrap()
@@ -738,19 +920,17 @@ mod tests {
     #[test]
     fn test_set_ip() {
         let key = Keypair::generate_secp256k1();
-        let id = "v5";
         let tcp = 30303;
         let ip = Ipv4Addr::new(10, 0, 0, 1);
 
         let mut enr = {
-            let mut builder = EnrBuilder::new();
-            builder.id(id);
+            let mut builder = EnrBuilder::new("v4");
             builder.tcp(tcp);
             builder.build(&key).unwrap()
         };
 
         assert!(enr.set_ip(ip.into(), &key).unwrap());
-        assert_eq!(enr.id(), Some(id.into()));
+        assert_eq!(enr.id(), Some("v4".into()));
         assert_eq!(enr.ip(), Some(ip.into()));
         assert_eq!(enr.tcp(), Some(tcp));
         assert!(enr.verify());
@@ -770,7 +950,7 @@ mod tests {
         let ip = Ipv4Addr::new(10, 0, 0, 1);
 
         let enr = {
-            let mut builder = EnrBuilder::new();
+            let mut builder = EnrBuilder::new("v4");
             builder.ip(ip.into());
             builder.tcp(tcp);
             builder.udp(udp);
@@ -795,7 +975,7 @@ mod tests {
         let ip = Ipv4Addr::new(10, 0, 0, 1);
 
         let mut enr = {
-            let mut builder = EnrBuilder::new();
+            let mut builder = EnrBuilder::new("v4");
             builder.ip(ip.into());
             builder.tcp(tcp);
             builder.udp(udp);

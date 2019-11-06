@@ -246,7 +246,7 @@ impl<TSubstream> Gossipsub<TSubstream> {
         info!("Published message: {:?}", message.id());
     }
 
-    /// This function should be called when `config.propagate_messages` is false to order to
+    /// This function should be called when `config.manual_propagation` is `true` to order to
     /// propagate messages. Messages are stored in the Memcache and validation is expected to be
     /// fast enough that the messages should still exist in the cache.
     ///
@@ -517,7 +517,7 @@ impl<TSubstream> Gossipsub<TSubstream> {
         }
 
         // forward the message to mesh peers, if no validation is required
-        if self.config.propagate_messages {
+        if !self.config.manual_propagation {
             let message_id = msg.id();
             self.forward_msg(msg, propagation_source);
             debug!("Completed message handling for message: {:?}", message_id);
@@ -982,7 +982,7 @@ where
 
     fn inject_disconnected(&mut self, id: &PeerId, _: ConnectedPoint) {
         // TODO: Refactor
-        // remove from mesh, topic_peers and peer_topic
+        // remove from mesh, topic_peers, peer_topic and fanout
         debug!("Peer disconnected: {:?}", id);
         {
             let topics = match self.peer_topics.get(&id) {
@@ -1022,6 +1022,13 @@ where
                         "ERROR: Disconnected node: {:?} with topic: {:?} not in topic_peers",
                         &id, &topic
                     );
+                }
+
+                // remove from fanout
+                if let Some(fanout_peers) = self.fanout.get_mut(&topic) {
+                    if let Some(pos) = fanout_peers.iter().position(|p| p == id) {
+                        fanout_peers.remove(pos);
+                    }
                 }
             }
         }

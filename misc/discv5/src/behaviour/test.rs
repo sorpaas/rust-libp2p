@@ -3,13 +3,12 @@
 use crate::{Discv5, Discv5Event};
 use env_logger;
 use libp2p_core::{
-    identity,
-    muxing::StreamMuxerBox,
-    nodes::Substream,
-    transport::{boxed::Boxed, MemoryTransport},
-    upgrade, PeerId, Swarm, Transport,
+    identity, muxing::StreamMuxerBox, nodes::Substream, transport::boxed::Boxed,
+    transport::MemoryTransport, PeerId, Transport,
 };
+use libp2p_swarm::Swarm;
 use tokio::prelude::*;
+use tokio::runtime::Runtime;
 
 use crate::kbucket;
 use enr::NodeId;
@@ -18,8 +17,8 @@ use libp2p_secio::SecioConfig;
 use libp2p_yamux as yamux;
 use std::io;
 use std::net::IpAddr;
-
-use tokio::runtime::Runtime;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 type SwarmType =
     Swarm<Boxed<(PeerId, StreamMuxerBox), io::Error>, Discv5<Substream<StreamMuxerBox>>>;
@@ -28,27 +27,23 @@ fn init() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
 
-fn build_swarms(n: usize) -> Vec<SwarmType> {
-    let base_port = 10000u16;
+fn build_swarms(n: usize, base_port: u16) -> Vec<SwarmType> {
     let mut swarms = Vec::new();
     let ip: IpAddr = "127.0.0.1".parse().unwrap();
 
     for port in base_port..base_port + n as u16 {
         let keypair = identity::Keypair::generate_secp256k1();
-        let enr = EnrBuilder::new()
+        let enr = EnrBuilder::new("v4")
             .ip(ip.clone().into())
             .udp(port)
             .build(&keypair)
             .unwrap();
-        // unused transport for building a swarm
+        // transport for building a swarm
         let transport = MemoryTransport::default()
-            .with_upgrade(SecioConfig::new(keypair.clone()))
-            .and_then(move |out, endpoint| {
-                let peer_id = out.remote_key.into_peer_id();
-                let yamux = yamux::Config::default();
-                upgrade::apply(out.stream, yamux, endpoint)
-                    .map(|muxer| (peer_id, StreamMuxerBox::new(muxer)))
-            })
+            .upgrade(libp2p_core::upgrade::Version::V1)
+            .authenticate(SecioConfig::new(keypair.clone()))
+            .multiplex(yamux::Config::default())
+            .map(|(p, m), _| (p, StreamMuxerBox::new(m)))
             .map_err(|e| panic!("Failed to create transport: {:?}", e))
             .boxed();
         let discv5 = Discv5::new(enr, keypair.clone(), ip.into()).unwrap();
@@ -61,12 +56,141 @@ fn build_swarms(n: usize) -> Vec<SwarmType> {
     swarms
 }
 
+/// Build `n` swarms using passed keypairs.
+fn build_swarms_from_keypairs(keypairs: Vec<identity::Keypair>) -> Vec<SwarmType> {
+    let base_port = 10000u16;
+    let mut swarms = Vec::new();
+    let ip: IpAddr = "127.0.0.1".parse().unwrap();
+
+    // for port in base_port..base_port + keypairs.len() as u16 {
+    for i in 0..keypairs.len() {
+        let port = base_port + i as u16;
+        let keypair = &keypairs[i];
+        let enr = EnrBuilder::new("v4")
+            .ip(ip.clone().into())
+            .udp(port)
+            .build(&keypair)
+            .unwrap();
+        // transport for building a swarm
+        let transport = MemoryTransport::default()
+            .upgrade(libp2p_core::upgrade::Version::V1)
+            .authenticate(SecioConfig::new(keypair.clone()))
+            .multiplex(yamux::Config::default())
+            .map(|(p, m), _| (p, StreamMuxerBox::new(m)))
+            .map_err(|e| panic!("Failed to create transport: {:?}", e))
+            .boxed();
+        let discv5 = Discv5::new(enr, keypair.clone(), ip.into()).unwrap();
+        swarms.push(Swarm::new(
+            transport,
+            discv5,
+            keypair.public().into_peer_id(),
+        ));
+    }
+    swarms
+}
+
+/// Return log2 distance between 2 node ids
+fn get_distance(node1: &NodeId, node2: &NodeId) -> Option<u64> {
+    let node1: kbucket::Key<NodeId> = node1.clone().into();
+    node1.log2_distance(&node2.clone().into())
+}
+
+/// Generate `n` keypairs such that the node ids they generate are close to
+/// the generated bootstrap node. Return the `n` nodes along with the bootstrap node.
+fn generate_keypairs(n: usize) -> Vec<identity::Keypair> {
+    let mut keypairs: Vec<identity::Keypair> = Vec::new();
+    let bootstrap_keypair = identity::Keypair::generate_secp256k1();
+    let bootstrap_node_id = EnrBuilder::new("v4")
+        .build(&bootstrap_keypair)
+        .unwrap()
+        .node_id()
+        .clone();
+    for _ in 0..n {
+        loop {
+            let keypair = identity::Keypair::generate_secp256k1();
+            let enr = EnrBuilder::new("v4").build(&keypair).unwrap();
+            let key = enr.node_id();
+            let distance = get_distance(&bootstrap_node_id, key).unwrap();
+            // Any distance > 254 should be good enough for discovering nodes in one
+            // complete query
+            if distance > 254 {
+                keypairs.push(keypair);
+                break;
+            }
+        }
+    }
+    keypairs.push(bootstrap_keypair);
+    keypairs
+}
+
+#[test]
+fn test_discovery_star_topology() {
+    init();
+    let node_num = 12;
+    // Generate `num_nodes` nodes with the bootstrap node and 1 target_node
+    let keypairs = generate_keypairs(node_num + 1);
+    let mut swarms = build_swarms_from_keypairs(keypairs);
+    // Last node is bootstrap node in a star topology
+    let mut bootstrap_node = swarms.pop().unwrap();
+    // target_node is a node "close" to the bootstrap node for the FINDNODE query
+    //target_node is not polled.
+    let target_node = swarms.pop().unwrap();
+    println!("Bootstrap node: {}", bootstrap_node.local_enr().node_id());
+    println!("Target node: {}", target_node.local_enr().node_id());
+    for swarm in swarms.iter_mut() {
+        let key: kbucket::Key<NodeId> = swarm.local_enr().node_id().clone().into();
+        let distance = key
+            .log2_distance(&bootstrap_node.local_enr().node_id().clone().into())
+            .unwrap();
+        println!(
+            "Distance of node {} relative to node {}: {}",
+            swarm.local_enr().node_id(),
+            bootstrap_node.local_enr().node_id(),
+            distance
+        );
+        swarm.add_enr(bootstrap_node.local_enr().clone());
+        bootstrap_node.add_enr(swarm.local_enr().clone());
+    }
+    // Start a FINDNODE query of target
+    let target_random_node_id = target_node.local_enr().node_id();
+    swarms
+        .first_mut()
+        .unwrap()
+        .find_node(target_random_node_id.clone());
+    swarms.push(bootstrap_node);
+    Runtime::new()
+        .unwrap()
+        .block_on(future::poll_fn(move || -> Result<_, io::Error> {
+            for swarm in swarms.iter_mut() {
+                loop {
+                    match swarm.poll().unwrap() {
+                        Async::Ready(Some(Discv5Event::FindNodeResult {
+                            closer_peers, ..
+                        })) => {
+                            println!(
+                                "Query found {} peers, Total peers {}",
+                                closer_peers.len(),
+                                node_num
+                            );
+                            assert!(closer_peers.len() == node_num);
+                            return Ok(Async::Ready(()));
+                        }
+                        Async::Ready(_) => (),
+                        Async::NotReady => break,
+                    }
+                }
+            }
+            Ok(Async::NotReady)
+        }))
+        .unwrap();
+}
+
 #[test]
 fn test_findnode_query() {
     init();
     // build a collection of 8 nodes
     let node_num = 8;
-    let mut swarms = build_swarms(node_num);
+    let mut swarms = build_swarms(node_num, 30000);
     let node_enrs: Vec<Enr> = swarms.iter().map(|n| n.local_enr().clone()).collect();
 
     // link the nodes together
@@ -95,9 +219,11 @@ fn test_findnode_query() {
         .take(node_num - 1)
         .collect();
 
-    Runtime::new()
-        .unwrap()
-        .block_on(future::poll_fn(move || -> Result<_, io::Error> {
+    let test_result = Arc::new(Mutex::new(true));
+    let thread_result = test_result.clone();
+
+    tokio::run(
+        future::poll_fn(move || -> Result<_, io::Error> {
             for swarm in swarms.iter_mut() {
                 loop {
                     match swarm.poll().unwrap() {
@@ -120,6 +246,11 @@ fn test_findnode_query() {
                 }
             }
             Ok(Async::NotReady)
-        }))
-        .unwrap();
+        })
+        .timeout(Duration::from_millis(500))
+        .map_err(move |_| *thread_result.lock().unwrap() = false)
+        .map(|_| ()),
+    );
+
+    assert!(*test_result.lock().unwrap());
 }

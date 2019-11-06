@@ -35,8 +35,8 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::{marker::PhantomData, time::Duration};
-use tokio::timer::Interval;
 use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_timer::Interval;
 
 mod ip_vote;
 mod query_info;
@@ -67,7 +67,7 @@ pub struct Discv5<TSubstream> {
     active_rpc_requests: FnvHashMap<RpcRequest, (Option<QueryId>, rpc::Request)>,
 
     /// Keeps track of the number of responses received from a NODES response.
-    active_nodes_responses: HashMap<NodeId, usize>,
+    active_nodes_responses: HashMap<NodeId, NodesResponse>,
 
     /// A map of votes nodes have made about our external IP address. We accept the majority.
     ip_votes: IpVote,
@@ -89,6 +89,24 @@ pub struct Discv5<TSubstream> {
 
     /// Marker to pin the generics.
     marker: PhantomData<TSubstream>,
+}
+
+/// For multiple responses to a FindNodes request, this struct keeps track of the request count
+/// and the nodes that have been received.
+struct NodesResponse {
+    /// The response count.
+    count: usize,
+    /// The filtered nodes that have been received.
+    received_nodes: Vec<Enr>,
+}
+
+impl Default for NodesResponse {
+    fn default() -> Self {
+        NodesResponse {
+            count: 1,
+            received_nodes: Vec::new(),
+        }
+    }
 }
 
 impl<TSubstream> Discv5<TSubstream> {
@@ -265,24 +283,12 @@ impl<TSubstream> Discv5<TSubstream> {
             }
             match res {
                 rpc::Response::Nodes { total, mut nodes } => {
-                    if let Some(id) = query_id {
-                        let mut current_response = self
-                            .active_nodes_responses
-                            .remove(&node_id)
-                            .unwrap_or_else(|| 1);
-                        // Currently a maximum of 16 peers can be returned. Datagrams have a max
-                        // size of 1280 and ENR's have a max size of 300 bytes. There should be no
-                        // more than 5 responses, to return 16 peers.
-                        if total < 5 && (current_response as u64) < total {
-                            current_response += 1;
-                            self.active_rpc_requests
-                                .insert(req, (Some(id), request.clone()));
-                            self.active_nodes_responses
-                                .insert(node_id.clone(), current_response);
-                        } else {
-                            self.active_nodes_responses.remove(&node_id);
-                        }
-                    } // the following logic also applies to ENR updates (those not attached to a query).
+                    // Currently a maximum of 16 peers can be returned. Datagrams have a max
+                    // size of 1280 and ENR's have a max size of 300 bytes. There should be no
+                    // more than 5 responses, to return 16 peers.
+                    if total > 5 {
+                        warn!("NodesResponse has a total larger than 5, nodes will be truncated");
+                    }
 
                     // filter out any nodes that are not of the correct distance
                     // TODO: If a swarm peer reputation is built - downvote the peer if all
@@ -305,6 +311,39 @@ impl<TSubstream> Discv5<TSubstream> {
                                 .is_none()
                         });
                     }
+
+                    // handle the case that there is more than one response
+                    if total > 1 {
+                        let mut current_response = self
+                            .active_nodes_responses
+                            .remove(&node_id)
+                            .unwrap_or_else(|| Default::default());
+
+                        // if there are more requests coming, store the nodes and wait for
+                        // another response
+                        if current_response.count < 5 && (current_response.count as u64) < total {
+                            current_response.count += 1;
+
+                            current_response.received_nodes.append(&mut nodes);
+                            self.active_rpc_requests
+                                .insert(req, (query_id, request.clone()));
+                            self.active_nodes_responses
+                                .insert(node_id.clone(), current_response);
+                            return;
+                        }
+
+                        // have received all the Nodes responses we are willing to accept
+                        // ignore duplicates here as they will be handled when adding
+                        // to the DHT
+                        current_response.received_nodes.append(&mut nodes);
+                        nodes = current_response.received_nodes;
+                    }
+                    // note: If a client sends an initial NODES response with a total > 1 then
+                    // in a later response sends a response with a total of 1, all previous nodes
+                    // will be ignored.
+                    // ensure any mapping is removed in this rare case
+                    self.active_nodes_responses.remove(&node_id);
+
                     self.discovered(&node_id, nodes, query_id);
                 }
                 rpc::Response::Ping { enr_seq, ip, port } => {
@@ -319,13 +358,19 @@ impl<TSubstream> Discv5<TSubstream> {
                     }
 
                     // check if we need to request a new ENR
-                    if let Some(enr) = self.find_enr(&node_id) {
-                        if enr.seq() < enr_seq {
-                            // request an ENR update
-                            debug!("Requesting an ENR update from node: {}", node_id);
-                            let req = rpc::Request::FindNode { distance: 0 };
-                            self.send_rpc_request(&node_id, req, None);
+                    let enr = self.find_enr(&node_id);
+
+                    match enr {
+                        Some(enr) => {
+                            if enr.seq() < enr_seq {
+                                // request an ENR update
+                                debug!("Requesting an ENR update from node: {}", node_id);
+                                let req = rpc::Request::FindNode { distance: 0 };
+                                self.send_rpc_request(&node_id, req, None);
+                            }
+                            self.connection_updated(node_id.clone(), None, NodeStatus::Connected)
                         }
+                        None => (),
                     }
                 }
                 _ => {} //TODO: Implement all RPC methods
@@ -411,14 +456,18 @@ impl<TSubstream> Discv5<TSubstream> {
             let mut rpc_index = 0;
             to_send_nodes.push(Vec::new());
             for entry in nodes.into_iter() {
-                if entry.node.value.size() + total_size < MAX_PACKET_SIZE - 80 {
-                    total_size += entry.node.value.size();
+                let entry_size = entry.node.value.clone().encode().len();
+                // Responses assume that a session is established. Thus, on top of the encoded
+                // ENR's the packet should be a regular message. A regular message has a tag (32
+                // bytes), and auth_tag (12 bytes) and the NODES response has an ID (8 bytes) and a total (8 bytes). The encryption adds the HMAC (16 bytes) and can be at most 16 bytes larger so the total packet size can be at most 92 (given AES_GCM).
+                if entry_size + total_size < MAX_PACKET_SIZE - 92 {
+                    total_size += entry_size;
                     trace!("Adding ENR, Valid? : {}", entry.node.value.verify());
                     trace!("Enr: {}", entry.node.value.clone());
                     trace!("Enr: {:?}", entry.node.value.clone());
                     to_send_nodes[rpc_index].push(entry.node.value.clone());
                 } else {
-                    total_size = entry.node.value.size();
+                    total_size = entry_size;
                     to_send_nodes.push(vec![entry.node.value.clone()]);
                     rpc_index += 1;
                 }
@@ -693,13 +742,40 @@ impl<TSubstream> Discv5<TSubstream> {
     fn rpc_failure(&mut self, node_id: NodeId, failed_rpc_id: RpcId) {
         let req = RpcRequest(failed_rpc_id, node_id.clone());
 
-        if let Some((Some(query_id), _)) = self.active_rpc_requests.get(&req) {
-            if let Some(query) = self.active_queries.get_mut(&query_id) {
-                query.on_failure(&node_id);
+        if let Some((query_id_option, request)) = self.active_rpc_requests.remove(&req) {
+            match request {
+                // if a failed FindNodes request, ensure we haven't partially received packets. If
+                // so, process the partially found nodes
+                rpc::Request::FindNode { .. } => {
+                    if let Some(nodes_response) = self.active_nodes_responses.remove(&node_id) {
+                        if !nodes_response.received_nodes.is_empty() {
+                            warn!(
+                                "NODES Response failed, but was partially processed from Node: {}",
+                                node_id
+                            );
+                            // if it's a query mark it as success, to process the partial
+                            // collection of peers
+                            self.discovered(
+                                &node_id,
+                                nodes_response.received_nodes,
+                                query_id_option,
+                            );
+                        }
+                    }
+                }
+                // for all other requests, if any are queries, mark them as failures.
+                _ => {
+                    warn!("RPC Request: {:?} failed for node: {}", request, node_id);
+                    if let Some(query_id) = query_id_option {
+                        if let Some(query) = self.active_queries.get_mut(&query_id) {
+                            query.on_failure(&node_id);
+                        }
+                    }
+                }
             }
         }
 
-        // report the nodie as being disconnected.
+        // report the node as being disconnected
         debug!("Session dropped with Node: {}", node_id);
         self.connection_updated(node_id.clone(), None, NodeStatus::Disconnected);
         self.connected_peers.remove(&node_id);
@@ -774,12 +850,6 @@ where
         >,
     > {
         loop {
-            // Drain queued events
-            if !self.events.is_empty() {
-                return Async::Ready(NetworkBehaviourAction::GenerateEvent(self.events.remove(0)));
-            }
-            self.events.shrink_to_fit();
-
             // Process events from the session service
             while let Async::Ready(event) = self.service.poll() {
                 match event {
@@ -823,6 +893,12 @@ where
                     }
                 }
             }
+
+            // Drain queued events
+            if !self.events.is_empty() {
+                return Async::Ready(NetworkBehaviourAction::GenerateEvent(self.events.remove(0)));
+            }
+            self.events.shrink_to_fit();
 
             // Drain applied pending entries from the routing table.
             if let Some(entry) = self.kbuckets.take_applied_pending() {
@@ -923,4 +999,57 @@ pub enum Discv5Event {
         /// List of peers ordered from closest to furthest away.
         closer_peers: Vec<PeerId>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use enr::EnrBuilder;
+    use libp2p_core::identity;
+
+    #[test]
+    fn test_updating_connection_on_ping() {
+        let keypair = identity::Keypair::generate_secp256k1();
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        let enr = EnrBuilder::new("v4")
+            .ip(ip.clone().into())
+            .udp(10001)
+            .build(&keypair)
+            .unwrap();
+        let ip2: IpAddr = "127.0.0.1".parse().unwrap();
+        let keypair2 = identity::Keypair::generate_secp256k1();
+        let enr2 = EnrBuilder::new("v4")
+            .ip(ip2.clone().into())
+            .udp(10002)
+            .build(&keypair2)
+            .unwrap();
+
+        // Set up discv5 with one disconnected node
+        let mut discv5: Discv5<Box<u64>> = Discv5::new(enr, keypair.clone(), ip.into()).unwrap();
+        discv5.add_enr(enr2.clone());
+        discv5.connection_updated(enr2.node_id().clone(), None, NodeStatus::Disconnected);
+
+        let mut buckets = discv5.kbuckets.clone();
+        let mut node = buckets.iter().next().unwrap();
+        assert_eq!(node.status, NodeStatus::Disconnected);
+
+        // Add a fake request
+        let ping_response = rpc::Response::Ping {
+            enr_seq: 2,
+            ip: ip2,
+            port: 10002,
+        };
+        let ping_request = rpc::Request::Ping { enr_seq: 2 };
+        let req = RpcRequest(2, enr2.node_id().clone());
+        discv5
+            .active_rpc_requests
+            .insert(req, (Some(1), ping_request.clone()));
+
+        // Handle the ping and expect the disconnected Node to become connected
+        discv5.handle_rpc_response(enr2.node_id().clone(), 2, ping_response);
+        buckets = discv5.kbuckets.clone();
+
+        node = buckets.iter().next().unwrap();
+        assert_eq!(node.status, NodeStatus::Connected);
+    }
 }
