@@ -5,15 +5,15 @@
 //! There is no abstraction in this module as the specification explicitly defines a singular
 //! encryption and key-derivation algorithms. Future versions may abstract some of these to allow
 //! for different algorithms.
+use super::ecdh_ident::EcdhIdent;
 use crate::error::Discv5Error;
 use crate::packet::{AuthHeader, AuthResponse, AuthTag, Nonce};
 use enr::{Enr, NodeId};
 use hkdf::Hkdf;
 use libp2p_core::{identity::Keypair, PublicKey};
 use openssl::symm::{decrypt_aead, encrypt_aead, Cipher};
-use sha2::Sha256;
 use secp256k1::Signature;
-use super::ecdh_ident::EcdhIdent;
+use sha2::Sha256;
 
 const NODE_ID_LENGTH: usize = 32;
 const INFO_LENGTH: usize = 26 + 2 * NODE_ID_LENGTH;
@@ -51,13 +51,16 @@ pub fn generate_session_keys(
         }
 
         PublicKey::Secp256k1(pubkey) => {
-            let remote_pk = secp256k1::PublicKey::parse(&pubkey.encode_uncompressed()).expect("is a valid key");
+            let remote_pk =
+                secp256k1::PublicKey::parse(&pubkey.encode_uncompressed()).expect("is a valid key");
 
-            let ephem_libp2p_sk = libp2p_core::identity::secp256k1::SecretKey::generate(); 
-            let ephem_sk = secp256k1::SecretKey::parse(&ephem_libp2p_sk.to_bytes()).expect("valid key");
+            let ephem_libp2p_sk = libp2p_core::identity::secp256k1::SecretKey::generate();
+            let ephem_sk =
+                secp256k1::SecretKey::parse(&ephem_libp2p_sk.to_bytes()).expect("valid key");
             let ephem_pk = secp256k1::PublicKey::from_secret_key(&ephem_sk);
 
-            let secret = secp256k1::SharedSecret::<EcdhIdent>::new(&remote_pk, &ephem_sk).map_err(|_| Discv5Error::KeyDerivationFailed)?;
+            let secret = secp256k1::SharedSecret::<EcdhIdent>::new(&remote_pk, &ephem_sk)
+                .map_err(|_| Discv5Error::KeyDerivationFailed)?;
             // store as uncompressed, strip the first byte and send only 64 bytes.
             let ephem_pk = ephem_pk.serialize()[1..].to_vec();
 
@@ -77,7 +80,6 @@ fn derive_key(
     second_id: &NodeId,
     id_nonce: &Nonce,
 ) -> Result<(Key, Key, Key), Discv5Error> {
-
     let mut info = [0u8; INFO_LENGTH];
     info[0..26].copy_from_slice(KEY_AGREEMENT_STRING.as_bytes());
     info[26..26 + NODE_ID_LENGTH].copy_from_slice(&first_id.raw());
@@ -124,7 +126,8 @@ pub fn derive_keys_from_pubkey(
 
             let sk = secp256k1::SecretKey::parse(&key.secret().to_bytes()).expect("valid key");
 
-            let secret = secp256k1::SharedSecret::<EcdhIdent>::new(&remote_pubkey, &sk).map_err(|_| Discv5Error::KeyDerivationFailed)?;
+            let secret = secp256k1::SharedSecret::<EcdhIdent>::new(&remote_pubkey, &sk)
+                .map_err(|_| Discv5Error::KeyDerivationFailed)?;
             secret.as_ref().to_vec()
         }
     };
@@ -136,7 +139,11 @@ pub fn derive_keys_from_pubkey(
 
 /// Generates a signature of a nonce given a keypair. This prefixes the `NONCE_PREFIX` to the
 /// signature.
-pub fn sign_nonce(keypair: &Keypair, nonce: &Nonce, ephem_pubkey: &[u8]) -> Result<Vec<u8>, Discv5Error> {
+pub fn sign_nonce(
+    keypair: &Keypair,
+    nonce: &Nonce,
+    ephem_pubkey: &[u8],
+) -> Result<Vec<u8>, Discv5Error> {
     let signing_nonce = generate_signing_nonce(nonce, ephem_pubkey);
 
     match keypair {
@@ -144,8 +151,14 @@ pub fn sign_nonce(keypair: &Keypair, nonce: &Nonce, ephem_pubkey: &[u8]) -> Resu
         Keypair::Ed25519(_) => unimplemented!("Ed25519 keys are not supported"),
         // builds a compact secp256k1 serialized compact signature
         Keypair::Secp256k1(key) => {
-            let der_sig = key.secret().sign(&signing_nonce).map_err(|_| Discv5Error::Custom("Nonce signing failed"))?;
-            Ok(Signature::parse_der(&der_sig).map_err(|_| Discv5Error::Custom("Invalid DER signature"))?.serialize().to_vec())
+            let der_sig = key
+                .secret()
+                .sign(&signing_nonce)
+                .map_err(|_| Discv5Error::Custom("Nonce signing failed"))?;
+            Ok(Signature::parse_der(&der_sig)
+                .map_err(|_| Discv5Error::Custom("Invalid DER signature"))?
+                .serialize()
+                .to_vec())
         }
     }
 }
@@ -195,11 +208,10 @@ pub fn decrypt_authentication_header(
 
     // decrypt the auth-response
     let rlp_auth_response = decrypt_message(auth_resp_key, [0u8; 12], &header.auth_response, &[])?;
-    let auth_response = rlp::decode::<AuthResponse>(&rlp_auth_response)
-        .map_err(|e| Discv5Error::RLPError(e))?;
+    let auth_response =
+        rlp::decode::<AuthResponse>(&rlp_auth_response).map_err(|e| Discv5Error::RLPError(e))?;
     Ok(auth_response)
 }
-
 
 /// Decrypt messages that are post-fixed with an authenticated MAC.
 pub fn decrypt_message(
@@ -226,7 +238,6 @@ pub fn decrypt_message(
         &mac,
     )
     .map_err(|e| Discv5Error::DecryptionFail(format!("Could not decrypt message. Error: {:?}", e)))
-
 }
 
 /* Encryption related functions */
@@ -239,7 +250,6 @@ pub fn encrypt_message(
     message: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>, Discv5Error> {
-
     let mut mac: [u8; 16] = Default::default();
     let mut msg_cipher = encrypt_aead(
         Cipher::aes_128_gcm(),
@@ -270,14 +280,18 @@ mod tests {
     #[test]
     fn ref_test_ecdh() {
         let remote_pubkey = hex::decode("9961e4c2356d61bedb83052c115d311acb3a96f5777296dcf297351130266231503061ac4aaee666073d7e5bc2c80c3f5c5b500c1cb5fd0a76abbb6b675ad157").unwrap();
-        let local_secret_key = hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736").unwrap();
+        let local_secret_key =
+            hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736")
+                .unwrap();
 
-        let expected_secret = hex::decode("033b11a2a1f214567e1537ce5e509ffd9b21373247f2a3ff6841f4976f53165e7e").unwrap();
+        let expected_secret =
+            hex::decode("033b11a2a1f214567e1537ce5e509ffd9b21373247f2a3ff6841f4976f53165e7e")
+                .unwrap();
 
-        let mut remote_pk_bytes = [0;65];
+        let mut remote_pk_bytes = [0; 65];
         remote_pk_bytes[0] = 4; // pre-fixes a magic byte indicating this is in uncompressed form
         remote_pk_bytes[1..].copy_from_slice(&remote_pubkey);
-        let mut local_sk_bytes = [0;32];
+        let mut local_sk_bytes = [0; 32];
         local_sk_bytes.copy_from_slice(&local_secret_key);
 
         let remote_pk = secp256k1::PublicKey::parse(&remote_pk_bytes).unwrap();
@@ -290,16 +304,27 @@ mod tests {
 
     #[test]
     fn ref_key_derivation() {
-        let secret = hex::decode("02a77e3aa0c144ae7c0a3af73692b7d6e5b7a2fdc0eda16e8d5e6cb0d08e88dd04").unwrap();
-        let first_node_id = NodeId::parse(&hex::decode("a448f24c6d18e575453db13171562b71999873db5b286df957af199ec94617f7").unwrap()).unwrap();
-        let second_node_id = NodeId::parse(&hex::decode("885bba8dfeddd49855459df852ad5b63d13a3fae593f3f9fa7e317fd43651409").unwrap()).unwrap();
+        let secret =
+            hex::decode("02a77e3aa0c144ae7c0a3af73692b7d6e5b7a2fdc0eda16e8d5e6cb0d08e88dd04")
+                .unwrap();
+        let first_node_id = NodeId::parse(
+            &hex::decode("a448f24c6d18e575453db13171562b71999873db5b286df957af199ec94617f7")
+                .unwrap(),
+        )
+        .unwrap();
+        let second_node_id = NodeId::parse(
+            &hex::decode("885bba8dfeddd49855459df852ad5b63d13a3fae593f3f9fa7e317fd43651409")
+                .unwrap(),
+        )
+        .unwrap();
         let id_nonce = [1; 32];
 
         let expected_first_key = hex::decode("238d8b50e4363cf603a48c6cc3542967").unwrap();
         let expected_second_key = hex::decode("bebc0183484f7e7ca2ac32e3d72c8891").unwrap();
         let expected_auth_resp_key = hex::decode("e987ad9e414d5b4f9bfe4ff1e52f2fae").unwrap();
 
-        let (first_key, second_key, auth_resp_key) = derive_key(&secret, &first_node_id, &second_node_id, &id_nonce).unwrap();
+        let (first_key, second_key, auth_resp_key) =
+            derive_key(&secret, &first_node_id, &second_node_id, &id_nonce).unwrap();
 
         assert_eq!(first_key.to_vec(), expected_first_key);
         assert_eq!(second_key.to_vec(), expected_second_key);
@@ -308,19 +333,48 @@ mod tests {
 
     #[test]
     fn ref_nonce_signing() {
-        let nonce = [1; 32];
+        let nonce_bytes =
+            hex::decode("a77e3aa0c144ae7c0a3af73692b7d6e5b7a2fdc0eda16e8d5e6cb0d08e88dd04")
+                .unwrap();
         let ephemeral_pubkey = hex::decode("9961e4c2356d61bedb83052c115d311acb3a96f5777296dcf297351130266231503061ac4aaee666073d7e5bc2c80c3f5c5b500c1cb5fd0a76abbb6b675ad157").unwrap();
-        let local_secret_key = hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736").unwrap();
+        let local_secret_key =
+            hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736")
+                .unwrap();
 
-        let expected_nonce = hex::decode("3b7b8ce9df3fbd9b6367c365622ccc82a2cb9d94219401e7b08e3194f9f835764a07caad38bf0f5a7a89501a8156bb053c880774502f5cd8a6190fbe374adc89").unwrap();
+        let expected_sig = hex::decode("c5036e702a79902ad8aa147dabfe3958b523fd6fa36cc78e2889b912d682d8d35fdea142e141f690736d86f50b39746ba2d2fc510b46f82ee08f08fd55d133a4").unwrap();
 
-
-        let secret_key = libp2p_core::identity::secp256k1::SecretKey::from_bytes(local_secret_key).unwrap();
+        let mut nonce = [0u8; 32];
+        nonce.copy_from_slice(&nonce_bytes);
+        let secret_key =
+            libp2p_core::identity::secp256k1::SecretKey::from_bytes(local_secret_key).unwrap();
 
         let key = Keypair::Secp256k1(libp2p_core::identity::secp256k1::Keypair::from(secret_key));
-        let nonce = sign_nonce(&key, &nonce, &ephemeral_pubkey).unwrap();
+        let sig = sign_nonce(&key, &nonce, &ephemeral_pubkey).unwrap();
 
-        assert_eq!(nonce, expected_nonce);
+        assert_eq!(sig, expected_sig);
+    }
+
+    #[test]
+    fn ref_auth_pt() {
+        let nonce_bytes =
+            hex::decode("e551b1c44264ab92bc0b3c9b26293e1ba4fed9128f3c3645301e8e119f179c65")
+                .unwrap();
+        let local_secret_key =
+            hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736")
+                .unwrap();
+        let ephemeral_pubkey = hex::decode("9961e4c2356d61bedb83052c115d311acb3a96f5777296dcf297351130266231503061ac4aaee666073d7e5bc2c80c3f5c5b500c1cb5fd0a76abbb6b675ad157").unwrap();
+
+        let mut nonce = [0u8; 32];
+        nonce.copy_from_slice(&nonce_bytes);
+        let secret_key =
+            libp2p_core::identity::secp256k1::SecretKey::from_bytes(local_secret_key).unwrap();
+
+        let key = Keypair::Secp256k1(libp2p_core::identity::secp256k1::Keypair::from(secret_key));
+        let sig = sign_nonce(&key, &nonce, &ephemeral_pubkey).unwrap();
+
+        let auth_pt = AuthResponse::new(&sig, None).encode();
+
+        dbg!(hex::encode(auth_pt));
     }
 
     #[test]
@@ -328,15 +382,16 @@ mod tests {
         let key_bytes = hex::decode("9f2d77db7004bf8a1a85107ac686990b").unwrap();
         let nonce_bytes = hex::decode("27b5af763c446acd2749fe8e").unwrap();
         let pt = hex::decode("01c20101").unwrap();
-        let ad = hex::decode("93a7400fa0d6a694ebc24d5cf570f65d04215b6ac00757875e3f3a5f42107903").unwrap();
+        let ad = hex::decode("93a7400fa0d6a694ebc24d5cf570f65d04215b6ac00757875e3f3a5f42107903")
+            .unwrap();
         let expected_ciphertext = hex::decode("a5d12a2d94b8ccb3ba55558229867dc13bfa3648").unwrap();
 
-        let mut key = [0u8;16];
+        let mut key = [0u8; 16];
         key.copy_from_slice(&key_bytes);
-        let mut nonce = [0u8;12];
+        let mut nonce = [0u8; 12];
         nonce.copy_from_slice(&nonce_bytes);
 
-        let ciphertext = encrypt_message(&key, nonce,&pt, &ad).unwrap(); 
+        let ciphertext = encrypt_message(&key, nonce, &pt, &ad).unwrap();
 
         assert_eq!(ciphertext, expected_ciphertext);
     }
@@ -382,5 +437,4 @@ mod tests {
 
         assert_eq!(plain_text, msg);
     }
-
 }

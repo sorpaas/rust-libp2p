@@ -1,7 +1,7 @@
 use enr::Enr;
 use log::debug;
+use rlp::{DecoderError, RlpStream};
 use std::net::IpAddr;
-use rlp::{RlpStream, DecoderError};
 
 type TopicHash = [u8; 32];
 
@@ -142,13 +142,13 @@ impl ProtocolMessage {
         let msg_type = self.msg_type();
         buf.push(msg_type);
         let id = &self.id;
-        match &self.body {
+        match self.body {
             RpcType::Request(request) => match request {
                 Request::Ping { enr_seq } => {
                     let mut s = RlpStream::new();
                     s.begin_list(2);
                     s.append(id);
-                    s.append(enr_seq);
+                    s.append(&enr_seq);
                     buf.extend_from_slice(&s.drain());
                     buf
                 }
@@ -156,7 +156,7 @@ impl ProtocolMessage {
                     let mut s = RlpStream::new();
                     s.begin_list(2);
                     s.append(id);
-                    s.append(distance);
+                    s.append(&distance);
                     buf.extend_from_slice(&s.drain());
                     buf
                 }
@@ -194,9 +194,9 @@ impl ProtocolMessage {
                     let mut s = RlpStream::new();
                     s.begin_list(4);
                     s.append(id);
-                    s.append(enr_seq);
+                    s.append(&enr_seq);
                     s.append(&ip_bytes);
-                    s.append(port);
+                    s.append(&port);
                     buf.extend_from_slice(&s.drain());
                     buf
                 }
@@ -204,16 +204,15 @@ impl ProtocolMessage {
                     let mut s = RlpStream::new();
                     s.begin_list(3);
                     s.append(id);
-                    s.append(total);
+                    s.append(&total);
 
                     if nodes.is_empty() {
                         s.begin_list(0);
-                    }
-                    else {
-                        let enr_list: Vec<Vec<u8>> =
-                            nodes.iter().cloned().map(|enr| enr.encode()).collect();
-                        let rlp_enr_list = rlp::encode_list::<Vec<u8>, Vec<u8>>(&enr_list);
-                        s.append(&rlp_enr_list);
+                    } else {
+                        s.begin_list(nodes.len());
+                        for node in nodes {
+                            s.append(&node);
+                        }
                     }
                     buf.extend_from_slice(&s.drain());
                     buf
@@ -223,7 +222,7 @@ impl ProtocolMessage {
                     s.begin_list(3);
                     s.append(id);
                     s.append(&ticket.to_vec());
-                    s.append(wait_time);
+                    s.append(&wait_time);
                     buf.extend_from_slice(&s.drain());
                     buf
                 }
@@ -231,7 +230,7 @@ impl ProtocolMessage {
                     let mut s = RlpStream::new();
                     s.begin_list(2);
                     s.append(id);
-                    s.append(registered);
+                    s.append(&registered);
                     buf.extend_from_slice(&s.drain());
                     buf
                 }
@@ -251,10 +250,10 @@ impl ProtocolMessage {
         let list_len = rlp.item_count().and_then(|size| {
             if size < 2 {
                 Err(DecoderError::RlpIncorrectListLen)
-                }
-            else { 
+            } else {
                 Ok(size)
-            }})?;
+            }
+        })?;
 
         let id = rlp.val_at::<u64>(0)?;
 
@@ -262,17 +261,23 @@ impl ProtocolMessage {
             1 => {
                 // PingRequest
                 if list_len != 2 {
-                    debug!("Ping Request has an invalid RLP list length. Expected 2, found {}", list_len);
+                    debug!(
+                        "Ping Request has an invalid RLP list length. Expected 2, found {}",
+                        list_len
+                    );
                     return Err(DecoderError::RlpIncorrectListLen);
                 }
                 RpcType::Request(Request::Ping {
-                    enr_seq: rlp.val_at::<u64>(1)? 
+                    enr_seq: rlp.val_at::<u64>(1)?,
                 })
             }
             2 => {
                 // PingResponse
                 if list_len != 4 {
-                    debug!("Ping Response has an invalid RLP list length. Expected 4, found {}", list_len);
+                    debug!(
+                        "Ping Response has an invalid RLP list length. Expected 4, found {}",
+                        list_len
+                    );
                     return Err(DecoderError::RlpIncorrectListLen);
                 }
                 let ip_bytes = rlp.val_at::<Vec<u8>>(2)?;
@@ -287,8 +292,8 @@ impl ProtocolMessage {
                         ip.copy_from_slice(&ip_bytes);
                         IpAddr::from(ip)
                     }
-                    _ => { 
-                        debug!("Ping Response has incorrect byte length for IP"); 
+                    _ => {
+                        debug!("Ping Response has incorrect byte length for IP");
                         return Err(DecoderError::RlpIncorrectListLen);
                     }
                 };
@@ -302,7 +307,10 @@ impl ProtocolMessage {
             3 => {
                 // FindNodeRequest
                 if list_len != 2 {
-                    debug!("FindNode Request has an invalid RLP list length. Expected 2, found {}", list_len);
+                    debug!(
+                        "FindNode Request has an invalid RLP list length. Expected 2, found {}",
+                        list_len
+                    );
                     return Err(DecoderError::RlpIncorrectListLen);
                 }
                 RpcType::Request(Request::FindNode {
@@ -312,28 +320,21 @@ impl ProtocolMessage {
             4 => {
                 // NodesResponse
                 if list_len != 3 {
-                    debug!("Nodes Response has an invalid RLP list length. Expected 3, found {}", list_len);
+                    debug!(
+                        "Nodes Response has an invalid RLP list length. Expected 3, found {}",
+                        list_len
+                    );
                     return Err(DecoderError::RlpIncorrectListLen);
                 }
-                
+
                 let nodes = {
                     let enr_list_rlp = rlp.at(2)?;
                     if enr_list_rlp.is_empty() {
                         // no records
                         vec![]
-                    }
-                    else {
-                        let rlp_enr_bytes = enr_list_rlp.as_val::<Vec<u8>>()?;
-                        let rlp_enr_list = rlp::Rlp::new(&rlp_enr_bytes);
-                        let enr_list = rlp_enr_list.as_list::<Vec<u8>>()?;
-
-                        let mut nodes = vec![];
-                        for enr in enr_list.into_iter() {
-                            nodes.push(rlp::decode::<Enr>(&enr).map_err(|_| {
-                                DecoderError::Custom("Invalid ENR in FindNodes response list")
-                            })?);
-                        }
-                        nodes
+                    } else {
+                        let enr_list = enr_list_rlp.as_list::<Enr>()?;
+                        enr_list
                     }
                 };
                 RpcType::Response(Response::Nodes {
@@ -344,7 +345,10 @@ impl ProtocolMessage {
             5 => {
                 // TicketRequest
                 if list_len != 2 {
-                    debug!("Ticket Request has an invalid RLP list length. Expected 2, found {}", list_len);
+                    debug!(
+                        "Ticket Request has an invalid RLP list length. Expected 2, found {}",
+                        list_len
+                    );
                     return Err(DecoderError::RlpIncorrectListLen);
                 }
                 let topic = {
@@ -362,7 +366,10 @@ impl ProtocolMessage {
             6 => {
                 // TicketResponse
                 if list_len != 3 {
-                    debug!("Ticket Response has an invalid RLP list length. Expected 3, found {}", list_len);
+                    debug!(
+                        "Ticket Response has an invalid RLP list length. Expected 3, found {}",
+                        list_len
+                    );
                     return Err(DecoderError::RlpIncorrectListLen);
                 }
                 let ticket = rlp.val_at::<Vec<u8>>(1)?;
@@ -384,12 +391,17 @@ impl ProtocolMessage {
                     debug!("RegisterTopic Response has an invalid RLP list length. Expected 2, found {}", list_len);
                     return Err(DecoderError::RlpIncorrectListLen);
                 }
-                RpcType::Response(Response::RegisterTopic { registered: rlp.val_at::<bool>(1)? })
+                RpcType::Response(Response::RegisterTopic {
+                    registered: rlp.val_at::<bool>(1)?,
+                })
             }
             9 => {
                 // TopicQueryRequest
                 if list_len != 2 {
-                    debug!("TopicQuery Request has an invalid RLP list length. Expected 2, found {}", list_len);
+                    debug!(
+                        "TopicQuery Request has an invalid RLP list length. Expected 2, found {}",
+                        list_len
+                    );
                     return Err(DecoderError::RlpIncorrectListLen);
                 }
                 let topic = {
@@ -426,7 +438,7 @@ mod tests {
     use enr::EnrBuilder;
     use libp2p_core::identity::Keypair;
 
-     #[test]
+    #[test]
     fn ref_test_encode_request_ping() {
         // reference input
         let id = 1;
@@ -460,14 +472,16 @@ mod tests {
     fn ref_test_encode_request_ticket() {
         // reference input
         let id = 1;
-        let hash_bytes = hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736").unwrap();
+        let hash_bytes =
+            hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736")
+                .unwrap();
 
         // expected hex output
         let expected_output =
             hex::decode("05e201a0fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736")
                 .unwrap();
 
-        let mut topic_hash = [0;32];
+        let mut topic_hash = [0; 32];
         topic_hash.copy_from_slice(&hash_bytes);
 
         let body = RpcType::Request(Request::Ticket { topic: topic_hash });
@@ -480,7 +494,9 @@ mod tests {
     fn ref_test_encode_request_register_topic() {
         // reference input
         let id = 1;
-        let ticket = hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736").unwrap();
+        let ticket =
+            hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736")
+                .unwrap();
 
         // expected hex output
         let expected_output =
@@ -497,14 +513,16 @@ mod tests {
     fn ref_test_encode_request_topic_query() {
         // reference input
         let id = 1;
-        let hash_bytes = hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736").unwrap();
+        let hash_bytes =
+            hex::decode("fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736")
+                .unwrap();
 
         // expected hex output
         let expected_output =
             hex::decode("09e201a0fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736")
                 .unwrap();
 
-        let mut topic_hash = [0;32];
+        let mut topic_hash = [0; 32];
         topic_hash.copy_from_slice(&hash_bytes);
 
         let body = RpcType::Request(Request::TopicQuery { topic: topic_hash });
@@ -531,6 +549,22 @@ mod tests {
     }
 
     #[test]
+    fn ref_test_encode_response_nodes_empty() {
+        // reference input
+        let id = 1;
+        let total = 1;
+
+        let body = RpcType::Response(Response::Nodes {
+            total,
+            nodes: vec![],
+        });
+        // expected hex output
+        let expected_output = hex::decode("04c30101c0").unwrap();
+        let protocol_msg = ProtocolMessage { id, body };
+        assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+    #[test]
     fn ref_test_encode_response_nodes() {
         // reference input
         let id = 1;
@@ -549,10 +583,9 @@ mod tests {
             nodes: vec![enr],
         });
         // expected hex output
-        let expected_output = hex::decode("04f87f0101b87bf879b877f875b8401ce2991c64993d7c84c29a00bdc871917551c7d330fca2dd0d69c706596dc655448f030b98a77d4001fd46ae0112ce26d613c5a6a02a81a6223cd0c4edaa53280182696482763489736563703235366b31a103ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138").unwrap();
+        let expected_output = hex::decode("04f87b0101f877f875b8401ce2991c64993d7c84c29a00bdc871917551c7d330fca2dd0d69c706596dc655448f030b98a77d4001fd46ae0112ce26d613c5a6a02a81a6223cd0c4edaa53280182696482763489736563703235366b31a103ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138").unwrap();
 
         let protocol_msg = ProtocolMessage { id, body };
-
         assert_eq!(protocol_msg.encode(), expected_output);
     }
 
@@ -560,22 +593,41 @@ mod tests {
     fn ref_test_encode_response_nodes_multiple() {
         // reference input
         let id = 1;
-        let total = 2;
+        let total = 1;
         let enr = "enr:-HW4QBzimRxkmT18hMKaAL3IcZF1UcfTMPyi3Q1pxwZZbcZVRI8DC5infUAB_UauARLOJtYTxaagKoGmIjzQxO2qUygBgmlkgnY0iXNlY3AyNTZrMaEDymNMrg1JrLQB2KTGtv6MVbcNEVv0AHacwUAPMljNMTg".parse::<Enr>().unwrap();
 
         let enr2 = "enr:-HW4QNfxw543Ypf4HXKXdYxkyzfcxcO-6p9X986WldfVpnVTQX1xlTnWrktEWUbeTZnmgOuAY_KUhbVV1Ft98WoYUBMBgmlkgnY0iXNlY3AyNTZrMaEDDiy3QkHAxPyOgWbxp5oF1bDdlYE6dLCUUp8xfVw50jU".parse::<Enr>().unwrap();
-        
+
         let body = RpcType::Response(Response::Nodes {
             total,
             nodes: vec![enr, enr2],
         });
 
         // expected hex output
-        let expected_output = hex::decode("04f8f80102b8f4f8f2b877f875b8401ce2991c64993d7c84c29a00bdc871917551c7d330fca2dd0d69c706596dc655448f030b98a77d4001fd46ae0112ce26d613c5a6a02a81a6223cd0c4edaa53280182696482763489736563703235366b31a103ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138b877f875b840d7f1c39e376297f81d7297758c64cb37dcc5c3beea9f57f7ce9695d7d5a67553417d719539d6ae4b445946de4d99e680eb8063f29485b555d45b7df16a1850130182696482763489736563703235366b31a1030e2cb74241c0c4fc8e8166f1a79a05d5b0dd95813a74b094529f317d5c39d235").unwrap();
+        let expected_output = hex::decode("04f8f20101f8eef875b8401ce2991c64993d7c84c29a00bdc871917551c7d330fca2dd0d69c706596dc655448f030b98a77d4001fd46ae0112ce26d613c5a6a02a81a6223cd0c4edaa53280182696482763489736563703235366b31a103ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138f875b840d7f1c39e376297f81d7297758c64cb37dcc5c3beea9f57f7ce9695d7d5a67553417d719539d6ae4b445946de4d99e680eb8063f29485b555d45b7df16a1850130182696482763489736563703235366b31a1030e2cb74241c0c4fc8e8166f1a79a05d5b0dd95813a74b094529f317d5c39d235").unwrap();
 
         let protocol_msg = ProtocolMessage { id, body };
 
         assert_eq!(protocol_msg.encode(), expected_output);
+    }
+
+    #[test]
+    fn ref_decode_response_nodes_multiple() {
+        let input = hex::decode("04f8f20101f8eef875b8401ce2991c64993d7c84c29a00bdc871917551c7d330fca2dd0d69c706596dc655448f030b98a77d4001fd46ae0112ce26d613c5a6a02a81a6223cd0c4edaa53280182696482763489736563703235366b31a103ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138f875b840d7f1c39e376297f81d7297758c64cb37dcc5c3beea9f57f7ce9695d7d5a67553417d719539d6ae4b445946de4d99e680eb8063f29485b555d45b7df16a1850130182696482763489736563703235366b31a1030e2cb74241c0c4fc8e8166f1a79a05d5b0dd95813a74b094529f317d5c39d235").unwrap();
+
+        let expected_enr1 = "enr:-HW4QBzimRxkmT18hMKaAL3IcZF1UcfTMPyi3Q1pxwZZbcZVRI8DC5infUAB_UauARLOJtYTxaagKoGmIjzQxO2qUygBgmlkgnY0iXNlY3AyNTZrMaEDymNMrg1JrLQB2KTGtv6MVbcNEVv0AHacwUAPMljNMTg".parse::<Enr>().unwrap();
+        let expected_enr2 = "enr:-HW4QNfxw543Ypf4HXKXdYxkyzfcxcO-6p9X986WldfVpnVTQX1xlTnWrktEWUbeTZnmgOuAY_KUhbVV1Ft98WoYUBMBgmlkgnY0iXNlY3AyNTZrMaEDDiy3QkHAxPyOgWbxp5oF1bDdlYE6dLCUUp8xfVw50jU".parse::<Enr>().unwrap();
+
+        let decoded = ProtocolMessage::decode(input).unwrap();
+
+        match decoded.body {
+            RpcType::Response(Response::Nodes { total, nodes }) => {
+                assert_eq!(total, 1);
+                assert_eq!(nodes[0], expected_enr1);
+                assert_eq!(nodes[1], expected_enr2);
+            }
+            _ => panic!("Invalid decoding"),
+        }
     }
 
     #[test]
@@ -611,7 +663,6 @@ mod tests {
 
         assert_eq!(protocol_msg.encode(), expected_output);
     }
-
 
     #[test]
     fn encode_decode_ping_request() {

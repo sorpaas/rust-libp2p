@@ -48,7 +48,7 @@ use crate::enr_keypair::{EnrKeypair, EnrPublicKey};
 use base64;
 use libp2p_core::identity::{ed25519, Keypair, PublicKey};
 use log::debug;
-use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
+use rlp::{DecoderError, Rlp, RlpStream};
 use std::collections::BTreeMap;
 
 #[cfg(feature = "serde")]
@@ -223,7 +223,6 @@ impl Enr {
     }
 
     /// Returns a socket (based on the UDP port), if the IP and UDP fields are specified.
-    // This is primarily used for discv5 for which this library was built.
     pub fn udp_socket(&self) -> Option<SocketAddr> {
         if let Some(ip) = self.ip() {
             if let Some(udp) = self.udp() {
@@ -233,6 +232,21 @@ impl Enr {
         if let Some(ip6) = self.ip6() {
             if let Some(udp6) = self.udp6() {
                 return Some(SocketAddr::new(IpAddr::V6(ip6), udp6));
+            }
+        }
+        None
+    }
+
+    /// Returns a socket (based on the TCP port), if the IP and UDP fields are specified.
+    pub fn tcp_socket(&self) -> Option<SocketAddr> {
+        if let Some(ip) = self.ip() {
+            if let Some(tcp) = self.tcp() {
+                return Some(SocketAddr::new(IpAddr::V4(ip), tcp));
+            }
+        }
+        if let Some(ip6) = self.ip6() {
+            if let Some(tcp6) = self.tcp6() {
+                return Some(SocketAddr::new(IpAddr::V6(ip6), tcp6));
             }
         }
         None
@@ -272,7 +286,8 @@ impl Enr {
             Some(ref id) if id == "v4" => {
                 enr_pubkey.verify_v4(&self.rlp_content(), &self.signature)
             }
-            _ => unimplemented!(),
+            // unsupported identity schemes
+            _ => false,
         }
     }
 
@@ -380,7 +395,7 @@ impl Enr {
         self.add_key("tcp6", tcp.to_be_bytes().to_vec(), keypair)
     }
 
-    /// Sets the ip and udp port in a single update with a single increment in sequence number.
+    /// Sets the IP and UDP port in a single update with a single increment in sequence number.
     pub fn set_udp_socket(
         &mut self,
         socket: SocketAddr,
@@ -396,6 +411,44 @@ impl Enr {
                 self.content.insert("ip6".into(), addr.octets().to_vec());
                 self.content
                     .insert("udp6".into(), socket.port().to_be_bytes().to_vec());
+            }
+        };
+
+        let enr_keypair = EnrKeypair::from(keypair.clone());
+        let public_key = enr_keypair.public();
+        self.content
+            .insert(public_key.clone().into(), public_key.encode());
+        // increment the sequence number
+        self.seq = self
+            .seq
+            .checked_add(1)
+            .ok_or_else(|| EnrError::SequenceNumberTooHigh)?;
+
+        // sign the record
+        self.sign(enr_keypair)?;
+
+        // update the node id
+        self.node_id = NodeId::from(keypair.public());
+
+        Ok(true)
+    }
+
+    /// Sets the IP and TCP port in a single update with a single increment in sequence number.
+    pub fn set_tcp_socket(
+        &mut self,
+        socket: SocketAddr,
+        keypair: &Keypair,
+    ) -> Result<bool, EnrError> {
+        match socket.ip() {
+            IpAddr::V4(addr) => {
+                self.content.insert("ip".into(), addr.octets().to_vec());
+                self.content
+                    .insert("tcp".into(), socket.port().to_be_bytes().to_vec());
+            }
+            IpAddr::V6(addr) => {
+                self.content.insert("ip6".into(), addr.octets().to_vec());
+                self.content
+                    .insert("tcp6".into(), socket.port().to_be_bytes().to_vec());
             }
         };
 
@@ -445,7 +498,8 @@ impl Enr {
                 Some(ref id) if id == "v4" => enr_keypair
                     .sign_v4(&self.rlp_content())
                     .map_err(|_| EnrError::SigningError)?,
-                _ => unimplemented!(),
+                // other identity schemes are unsupported
+                _ => return Err(EnrError::SigningError),
             }
         };
         Ok(())
@@ -621,7 +675,8 @@ impl EnrBuilder {
             "v4" => enr_keypair
                 .sign_v4(&self.rlp_content())
                 .map_err(|_| EnrError::SigningError),
-            _ => unimplemented!(),
+            // unsupported identity schemes
+            _ => Err(EnrError::SigningError),
         }
     }
 
@@ -660,7 +715,7 @@ impl EnrBuilder {
     }
 }
 
-impl Encodable for Enr {
+impl rlp::Encodable for Enr {
     fn rlp_append(&self, s: &mut RlpStream) {
         s.begin_list(self.content.len() * 2 + 2);
         s.append(&self.signature);
@@ -673,7 +728,7 @@ impl Encodable for Enr {
     }
 }
 
-impl Decodable for Enr {
+impl rlp::Decodable for Enr {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
         if !rlp.is_list() {
             debug!("Failed to decode ENR. Not an RLP list: {}", rlp);
