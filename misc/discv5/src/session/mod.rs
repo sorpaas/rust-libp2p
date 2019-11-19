@@ -10,16 +10,16 @@
 //! This `Session` module is responsible for generating, deriving and holding keys for sessions for known peers.
 
 use super::packet::{AuthHeader, AuthResponse, AuthTag, Nonce, Packet, Tag, MAGIC_LENGTH};
-use crate::session_service::{SESSION_TIMEOUT, SESSION_ESTABLISH_TIMEOUT};
+use crate::session_service::{SESSION_ESTABLISH_TIMEOUT, SESSION_TIMEOUT};
 use crate::Discv5Error;
 use enr::{Enr, NodeId};
 use libp2p_core::identity::Keypair;
+use log::debug;
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio_timer::Delay;
 use zeroize::Zeroize;
-use log::debug;
 
 mod crypto;
 mod ecdh_ident;
@@ -77,7 +77,7 @@ pub enum SessionState {
 
     /// A RANDOM packet has been sent and the Session is awaiting a WHOAREYOU response.
     RandomSent,
-    
+
     /// An AuthMessage has been sent with a new set of generated keys. Once a response has been
     /// received that we can decrypt, the session transitions to an established state, replacing
     /// any current set of keys. No Session is currently active.
@@ -99,11 +99,10 @@ pub enum SessionState {
     Established(Keys),
 
     /// Processing has failed. Fatal error.
-    Poisoned
+    Poisoned,
 }
 
 impl Session {
-
     /* Session Generation Functions */
 
     /// Creates a new `Session` instance and generates a RANDOM packet to be sent along with this
@@ -115,7 +114,7 @@ impl Session {
             state: SessionState::RandomSent,
             trusted: TrustedState::Untrusted,
             remote_enr: Some(remote_enr),
-            timeout: Delay::new(Instant::now() + Duration::from_secs(SESSION_ESTABLISH_TIMEOUT)), 
+            timeout: Delay::new(Instant::now() + Duration::from_secs(SESSION_ESTABLISH_TIMEOUT)),
             last_seen_socket: "0.0.0.0:0".parse::<SocketAddr>().expect("Valid Socket"),
         };
 
@@ -155,7 +154,7 @@ impl Session {
             state: SessionState::WhoAreYouSent,
             trusted: TrustedState::Untrusted,
             remote_enr,
-            timeout: Delay::new(Instant::now() + Duration::from_secs(SESSION_ESTABLISH_TIMEOUT)), 
+            timeout: Delay::new(Instant::now() + Duration::from_secs(SESSION_ESTABLISH_TIMEOUT)),
             last_seen_socket: "0.0.0.0:0".parse::<SocketAddr>().expect("Valid Socket"),
         };
 
@@ -175,7 +174,6 @@ impl Session {
         id_nonce: Nonce,
         auth_header: &AuthHeader,
     ) -> Result<bool, Discv5Error> {
-
         // generate session keys
         let (decryption_key, encryption_key, auth_resp_key) = crypto::derive_keys_from_pubkey(
             local_keypair,
@@ -186,8 +184,7 @@ impl Session {
         )?;
 
         // decrypt the authentication header
-        let auth_response =
-            crypto::decrypt_authentication_header(&auth_resp_key, auth_header)?;
+        let auth_response = crypto::decrypt_authentication_header(&auth_resp_key, auth_header)?;
 
         // check and verify a potential ENR update
         if let Some(enr) = auth_response.node_record {
@@ -231,9 +228,7 @@ impl Session {
         self.state = SessionState::Established(keys);
 
         // update the timeout
-        self.timeout = Delay::new(
-            Instant::now() + Duration::from_secs(SESSION_TIMEOUT),
-        );
+        self.timeout = Delay::new(Instant::now() + Duration::from_secs(SESSION_TIMEOUT));
 
         // output if the session is trusted or untrusted
         Ok(self.update_trusted())
@@ -251,70 +246,78 @@ impl Session {
         id_nonce: &Nonce,
         message: &[u8],
     ) -> Result<Packet, Discv5Error> {
+        // generate the session keys
+        let (encryption_key, decryption_key, auth_resp_key, ephem_pubkey) =
+            crypto::generate_session_keys(
+                local_node_id,
+                self.remote_enr
+                    .as_ref()
+                    .expect("Should never be None at this point"),
+                id_nonce,
+            )?;
 
-    // generate the session keys
-    let (encryption_key, decryption_key, auth_resp_key, ephem_pubkey) =
-        crypto::generate_session_keys(
-            local_node_id,
-            self.remote_enr
-                .as_ref()
-                .expect("Should never be None at this point"),
-            id_nonce,
-        )?;
+        let keys = Keys {
+            auth_resp_key,
+            encryption_key,
+            decryption_key,
+        };
 
-    let keys = Keys {
-        auth_resp_key,
-        encryption_key,
-        decryption_key,
-    };
+        // construct the nonce signature
+        let sig = crypto::sign_nonce(keypair, id_nonce, &ephem_pubkey)
+            .map_err(|_| Discv5Error::Custom("Could not sign WHOAREYOU nonce"))?;
 
-    // construct the nonce signature
-    let sig =  crypto::sign_nonce(keypair, id_nonce, &ephem_pubkey).map_err(|_| Discv5Error::Custom("Could not sign WHOAREYOU nonce"))?;
+        // generate the auth response to be encrypted
+        let auth_pt = AuthResponse::new(&sig, updated_enr).encode();
 
-    // generate the auth response to be encrypted
-    let auth_pt = AuthResponse::new(&sig, updated_enr).encode();
+        // encrypt the auth response
+        let auth_response_ciphertext =
+            crypto::encrypt_message(&auth_resp_key, [0u8; 12], &auth_pt, &[])?;
 
+        // generate an auth header, with a random auth_tag
+        let auth_tag: [u8; 12] = rand::random();
+        let auth_header = AuthHeader::new(
+            auth_tag,
+            id_nonce.clone(),
+            ephem_pubkey.to_vec(),
+            auth_response_ciphertext,
+        );
 
-    // encrypt the auth response
-    let auth_response_ciphertext  = crypto::encrypt_message(&auth_resp_key, [0u8; 12], &auth_pt, &[])?;
+        // encrypt the message
+        let message_ciphertext =
+            crypto::encrypt_message(&encryption_key, auth_tag, message, &tag[..])?;
 
+        // update the session state
+        match std::mem::replace(&mut self.state, SessionState::Poisoned) {
+            SessionState::Established(current_keys) => {
+                self.state = SessionState::EstablishedAwaitingResponse {
+                    current_keys,
+                    new_keys: keys,
+                }
+            }
+            SessionState::Poisoned => panic!(),
+            _ => self.state = SessionState::AwaitingResponse(keys),
+        }
 
-    // generate an auth header, with a random auth_tag
-    let auth_tag: [u8; 12] = rand::random();
-    let auth_header = AuthHeader::new(
-        auth_tag,
-        id_nonce.clone(),
-        ephem_pubkey.to_vec(),
-        auth_response_ciphertext,
-    );
-
-    // encrypt the message
-    let message_ciphertext = crypto::encrypt_message(&encryption_key, auth_tag, message, &tag[..])?;
-
-    // update the session state
-    match std::mem::replace(&mut self.state, SessionState::Poisoned) {
-        SessionState::Established(current_keys) => self.state = SessionState::EstablishedAwaitingResponse{ current_keys, new_keys: keys},
-        SessionState::Poisoned => panic!(),
-        _=> self.state = SessionState::AwaitingResponse(keys),
-    }
-
-    Ok(Packet::AuthMessage {
-        tag,
-        auth_header,
-        message: message_ciphertext,
-    })
+        Ok(Packet::AuthMessage {
+            tag,
+            auth_header,
+            message: message_ciphertext,
+        })
     }
 
     /// Uses the current `Session` to encrypt a message. Encrypt packets with the current session
     /// key if we are awaiting a response from AuthMessage.
     pub fn encrypt_message(&self, tag: Tag, message: &[u8]) -> Result<Packet, Discv5Error> {
-
         //TODO: Establish a counter to prevent repeats of nonce
         let auth_tag: AuthTag = rand::random();
 
         let cipher = match &self.state {
-            SessionState::Established(keys) => crypto::encrypt_message(&keys.encryption_key, auth_tag, message, &tag)?,
-            SessionState::EstablishedAwaitingResponse {current_keys, ..} => crypto::encrypt_message(&current_keys.encryption_key, auth_tag, message, &tag)?,
+            SessionState::Established(keys) => {
+                crypto::encrypt_message(&keys.encryption_key, auth_tag, message, &tag)?
+            }
+            SessionState::EstablishedAwaitingResponse { current_keys, .. } => {
+                crypto::encrypt_message(&current_keys.encryption_key, auth_tag, message, &tag)?
+            }
             _ => return Err(Discv5Error::SessionNotEstablished),
         };
 
@@ -336,47 +339,55 @@ impl Session {
         message: &[u8],
         aad: &[u8],
     ) -> Result<Vec<u8>, Discv5Error> {
-
         let node_id = self.remote_enr.as_ref().expect("ENR must exist").node_id();
         match std::mem::replace(&mut self.state, SessionState::Poisoned) {
             SessionState::Established(keys) => {
                 let result = crypto::decrypt_message(&keys.decryption_key, nonce, message, aad);
                 self.state = SessionState::Established(keys);
                 result
-            },
-            SessionState::EstablishedAwaitingResponse { current_keys, new_keys } => { 
+            }
+            SessionState::EstablishedAwaitingResponse {
+                current_keys,
+                new_keys,
+            } => {
                 // try the original keys first
-                let message_result = crypto::decrypt_message(&current_keys.decryption_key, nonce, message, aad);
+                let message_result =
+                    crypto::decrypt_message(&current_keys.decryption_key, nonce, message, aad);
                 if message_result.is_ok() {
                     // The request for a new session is invalid, throw it away
                     self.state = SessionState::Established(current_keys);
                     message_result
-                }
-                else {
+                } else {
                     debug!("Old session key failed to decrypt message");
                     // try decrypt with the new keys
-                    let new_key_result = crypto::decrypt_message(&new_keys.decryption_key, nonce, message, aad);
+                    let new_key_result =
+                        crypto::decrypt_message(&new_keys.decryption_key, nonce, message, aad);
                     if new_key_result.is_ok() {
                         debug!("Session keys have been updated for node: {}", node_id);
                         self.state = SessionState::Established(new_keys);
+                    } else {
+                        // no set of keys could decrypt the message, maintain the same state
+                        self.state = SessionState::EstablishedAwaitingResponse {
+                            current_keys,
+                            new_keys,
+                        }
                     }
                     new_key_result
                 }
-            },
-            SessionState::AwaitingResponse(keys) => {
-                    let message_result = crypto::decrypt_message(&keys.decryption_key, nonce, message, aad);
-                    if message_result.is_ok() {
-                        self.state = SessionState::Established(keys);
-                    }
-                    else {
-                        self.state = SessionState::AwaitingResponse(keys);
-                    }
-                    message_result
             }
-            SessionState::Poisoned => panic!(),
-            _ => return Err(Discv5Error::SessionNotEstablished)
+            SessionState::AwaitingResponse(keys) => {
+                let message_result =
+                    crypto::decrypt_message(&keys.decryption_key, nonce, message, aad);
+                if message_result.is_ok() {
+                    self.state = SessionState::Established(keys);
+                } else {
+                    self.state = SessionState::AwaitingResponse(keys);
+                }
+                message_result
+            }
+            SessionState::Poisoned => unreachable!(),
+            _ => return Err(Discv5Error::SessionNotEstablished),
         }
-
     }
 
     /* Session Helper Functions */
@@ -435,7 +446,11 @@ impl Session {
     }
 
     pub fn is_awaiting_response(&self) -> bool {
-        if let SessionState::AwaitingResponse(_) = self.state { true } else { false }
+        if let SessionState::AwaitingResponse(_) = self.state {
+            true
+        } else {
+            false
+        }
     }
 
     pub fn remote_enr(&self) -> &Option<Enr> {
@@ -458,7 +473,7 @@ impl Session {
             SessionState::RandomSent => false,
             SessionState::AwaitingResponse(_) => false,
             SessionState::Established(_) => true,
-            SessionState::EstablishedAwaitingResponse{..} => true,
+            SessionState::EstablishedAwaitingResponse { .. } => true,
             SessionState::Poisoned => unreachable!(),
         };
 

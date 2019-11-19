@@ -180,12 +180,39 @@ impl<TSubstream> Discv5<TSubstream> {
         };
     }
 
+    /// Returns the number of connected peers the behaviour knows about.
     pub fn connected_peers(&self) -> usize {
         self.connected_peers.len()
     }
 
+    /// Returns the local ENR of the node.
     pub fn local_enr(&self) -> &Enr {
         &self.service.enr()
+    }
+
+    /// Allows the application layer to update the local ENR's UDP socket. The second parameter
+    /// determines whether the port is a TCP port. If this parameter is false, this is
+    /// interpreted as a UDP `SocketAddr`.
+    pub fn update_local_enr_socket(&mut self, socket_addr: SocketAddr, is_tcp: bool) -> bool {
+        if is_tcp {
+            if self.local_enr().tcp_socket() == Some(socket_addr) {
+                // nothing to do, not updated
+                return false;
+            }
+        } else {
+            if self.local_enr().udp_socket() == Some(socket_addr) {
+                // nothing to do, not updated
+                return false;
+            }
+        }
+        // a new socket addr has been supplied
+        if self.service.update_local_enr_socket(socket_addr, is_tcp) {
+            // notify peers of the update
+            self.ping_connected_peers();
+            true
+        } else {
+            false
+        }
     }
 
     /// Returns an iterator over all ENR node IDs of nodes currently contained in a bucket
@@ -352,9 +379,10 @@ impl<TSubstream> Discv5<TSubstream> {
                     if self.ip_votes.majority() != self.local_enr().udp_socket() {
                         info!("Local IP Address updated to: {}", socket);
                         self.events.push(Discv5Event::SocketUpdated(socket));
-                        let _ = self.service.set_udp_socket(socket);
-                        // alert known peers to our updated enr
-                        self.ping_connected_peers();
+                        if self.service.update_local_enr_socket(socket, false) {
+                            // alert known peers to our updated enr
+                            self.ping_connected_peers();
+                        }
                     }
 
                     // check if we need to request a new ENR
