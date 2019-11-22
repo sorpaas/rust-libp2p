@@ -294,7 +294,7 @@ impl Session {
                     new_keys: keys,
                 }
             }
-            SessionState::Poisoned => panic!(),
+            SessionState::Poisoned => unreachable!("Coding error if this is possible"),
             _ => self.state = SessionState::AwaitingResponse(keys),
         }
 
@@ -351,42 +351,53 @@ impl Session {
                 new_keys,
             } => {
                 // try the original keys first
-                let message_result =
-                    crypto::decrypt_message(&current_keys.decryption_key, nonce, message, aad);
-                if message_result.is_ok() {
-                    // The request for a new session is invalid, throw it away
-                    self.state = SessionState::Established(current_keys);
-                    message_result
-                } else {
-                    debug!("Old session key failed to decrypt message");
-                    // try decrypt with the new keys
-                    let new_key_result =
-                        crypto::decrypt_message(&new_keys.decryption_key, nonce, message, aad);
-                    if new_key_result.is_ok() {
-                        debug!("Session keys have been updated for node: {}", node_id);
-                        self.state = SessionState::Established(new_keys);
-                    } else {
-                        // no set of keys could decrypt the message, maintain the same state
-                        self.state = SessionState::EstablishedAwaitingResponse {
-                            current_keys,
-                            new_keys,
+                match crypto::decrypt_message(&current_keys.decryption_key, nonce, message, aad) {
+                    Ok(message) => {
+                        // The request for a new session is invalid, throw it away
+                        self.state = SessionState::Established(current_keys);
+                        Ok(message)
+                    }
+                    Err(_) => {
+                        debug!("Old session key failed to decrypt message");
+                        // try decrypt with the new keys
+
+                        match crypto::decrypt_message(&new_keys.decryption_key, nonce, message, aad)
+                        {
+                            Ok(msg) => {
+                                debug!("Session keys have been updated for node: {}", node_id);
+                                self.state = SessionState::Established(new_keys);
+                                Ok(msg)
+                            }
+                            Err(e) => {
+                                // no set of keys could decrypt the message, maintain the same state
+                                self.state = SessionState::EstablishedAwaitingResponse {
+                                    current_keys,
+                                    new_keys,
+                                };
+                                Err(e)
+                            }
                         }
                     }
-                    new_key_result
                 }
             }
             SessionState::AwaitingResponse(keys) => {
-                let message_result =
-                    crypto::decrypt_message(&keys.decryption_key, nonce, message, aad);
-                if message_result.is_ok() {
-                    self.state = SessionState::Established(keys);
-                } else {
-                    self.state = SessionState::AwaitingResponse(keys);
+                match crypto::decrypt_message(&keys.decryption_key, nonce, message, aad) {
+                    Ok(message) => {
+                        self.state = SessionState::Established(keys);
+                        Ok(message)
+                    }
+                    Err(e) => {
+                        self.state = SessionState::AwaitingResponse(keys);
+                        Err(e)
+                    }
                 }
-                message_result
             }
             SessionState::Poisoned => unreachable!(),
-            _ => return Err(Discv5Error::SessionNotEstablished),
+            message_sent_state => {
+                // have sent a WHOAREYOU or a RandomPacket, session isn't established
+                self.state = message_sent_state;
+                return Err(Discv5Error::SessionNotEstablished);
+            }
         }
     }
 
