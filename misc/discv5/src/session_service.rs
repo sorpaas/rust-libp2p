@@ -30,7 +30,7 @@ use libp2p_core::identity::Keypair;
 use log::{debug, error, trace, warn};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
-use std::collections::VecDeque;
+use std::collections::{hash_map::Entry, VecDeque};
 use std::default::Default;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -541,9 +541,9 @@ impl SessionService {
         tag: Tag,
     ) -> Result<(), ()> {
         // check if we have an available session
-        let session = match self.sessions.get_mut(&src_id) {
-            Some(s) => s,
-            None => {
+        let mut session_entry = match self.sessions.entry(src_id.clone()) {
+            Entry::Occupied(e) => e,
+            Entry::Vacant(_) => {
                 // no session exists
                 debug!("Received a message without a session. From: {}", src_id);
                 debug!("Requesting a WHOAREYOU packet to be sent.");
@@ -559,7 +559,7 @@ impl SessionService {
         };
 
         // if we have sent a random packet, upgrade to a WhoAreYou request
-        if session.is_random_sent() {
+        if session_entry.get().is_random_sent() {
             let event = SessionEvent::WhoAreYouRequest {
                 src,
                 src_id: src_id.clone(),
@@ -568,7 +568,7 @@ impl SessionService {
             self.events.push_back(event);
         }
         // return if we are awaiting a WhoAreYou packet
-        else if session.is_whoareyou_sent() {
+        else if session_entry.get().is_whoareyou_sent() {
             debug!("Waiting for a session to be generated.");
             // potentially store and decrypt once we receive the packet.
             // drop it for now.
@@ -578,15 +578,29 @@ impl SessionService {
         // we could be in the AwaitingResponse state. If so, this message could establish a new
         // session with a node. We keep track to see if the decryption updates the session. If so,
         // we notify the user and flush all cached messages.
-        let session_was_awaiting = session.is_awaiting_response();
+        let session_was_awaiting = session_entry.get().is_awaiting_response();
 
         // attempt to decrypt and process the message.
-        let message = match session.decrypt_message(auth_tag, message, &tag) {
+        let message = match session_entry
+            .get_mut()
+            .decrypt_message(auth_tag, message, &tag)
+        {
             Ok(m) => ProtocolMessage::decode(m)
                 .map_err(|e| warn!("Failed to decode message. Error: {:?}", e))?,
-            Err(e) => {
-                debug!("Message from node: {} is not encrypted with known session keys. Dropping packet. Error: {:?}", src_id, e);
-                return Err(());
+            Err(_) => {
+                // We have a session, but the message could not be decrypted. It is likely the node
+                // sending this message has dropped their session. In this case, this message is a
+                // Random packet and we should reply with a WHOAREYOU.
+                // This means we need to drop the current session and re-establish.
+                debug!("Message from node: {} is not encrypted with known session keys. Requesting a WHOAREYOU packet", src_id);
+                session_entry.remove_entry();
+                let event = SessionEvent::WhoAreYouRequest {
+                    src,
+                    src_id: src_id.clone(),
+                    auth_tag,
+                };
+                self.events.push_back(event);
+                return Ok(());
             }
         };
 
@@ -612,20 +626,24 @@ impl SessionService {
         self.events.push_back(event);
 
         // update the last_seen_socket and check if we need to promote the session to trusted
-        session.set_last_seen_socket(src);
+        session_entry.get_mut().set_last_seen_socket(src);
 
         // There are two possibilities a session could have been established. The latest message
         // matches the known ENR and upgrades the session to an established state, or, we were
         // awaiting a message to be decrypted with new session keys, this just arrived and we now
         // consider the session established. In both cases, we notify the user and flush the cached
         // messages.
-        if (session.update_trusted() && session.trusted_established())
-            | (session.trusted_established() && session_was_awaiting)
+        if (session_entry.get_mut().update_trusted() && session_entry.get().trusted_established())
+            | (session_entry.get().trusted_established() && session_was_awaiting)
         {
             trace!("Session has been updated to ESTABLISHED. Node: {}", src_id);
             // session has been established, notify the protocol
             self.events.push_back(SessionEvent::Established(
-                session.remote_enr().clone().expect("ENR exists"),
+                session_entry
+                    .get()
+                    .remote_enr()
+                    .clone()
+                    .expect("ENR exists"),
             ));
             let _ = self.flush_messages(src, &src_id);
         }

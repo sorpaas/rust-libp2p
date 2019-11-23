@@ -4,14 +4,15 @@ use crate::rpc::{Request, Response, RpcType};
 use enr::EnrBuilder;
 use libp2p_core::identity::Keypair;
 use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
 use tokio::prelude::*;
-use std::sync::{Arc,Mutex};
 
 fn init() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
 
 #[test]
+// Tests the construction and sending of a simple message
 fn simple_session_message() {
     init();
 
@@ -87,15 +88,16 @@ fn simple_session_message() {
     let thread_result = test_result.clone();
     tokio::run(
         sender
-            .select(receiver).timeout(Duration::from_millis(100))
-            .map_err(move |_| 
-                     *thread_result.lock().unwrap() = false)
+            .select(receiver)
+            .timeout(Duration::from_millis(100))
+            .map_err(move |_| *thread_result.lock().unwrap() = false)
             .map(|_| ()),
     );
     assert!(*test_result.lock().unwrap());
 }
 
 #[test]
+// Tests sending multiple messages on an encrypted session
 fn multiple_messages() {
     init();
     let sender_port = 5002;
@@ -127,7 +129,11 @@ fn multiple_messages() {
 
     let pong_response = ProtocolMessage {
         id: 1,
-        body: RpcType::Response(Response::Ping { enr_seq: 1, ip: ip, port: sender_port }),
+        body: RpcType::Response(Response::Ping {
+            enr_seq: 1,
+            ip: ip,
+            port: sender_port,
+        }),
     };
 
     let receiver_send_message = send_message.clone();
@@ -172,7 +178,7 @@ fn multiple_messages() {
                     assert_eq!(*message, receiver_send_message);
                     message_count += 1;
                     // required to send a pong response to establish the session
-                    let _ = receiver_service.send_request(&sender_enr, pong_response.clone()); 
+                    let _ = receiver_service.send_request(&sender_enr, pong_response.clone());
                     if message_count == messages_to_send {
                         return Ok(Async::Ready(()));
                     }
@@ -186,9 +192,9 @@ fn multiple_messages() {
     let thread_result = test_result.clone();
     tokio::run(
         sender
-            .select(receiver).timeout(Duration::from_millis(100))
-            .map_err(move |_| 
-                     *thread_result.lock().unwrap() = false)
+            .select(receiver)
+            .timeout(Duration::from_millis(100))
+            .map_err(move |_| *thread_result.lock().unwrap() = false)
             .map(|_| ()),
     );
     assert!(*test_result.lock().unwrap());

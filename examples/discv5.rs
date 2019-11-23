@@ -23,7 +23,7 @@
 //! port 9001 and connected to the first via:
 //!
 //! ```
-//! sh cargo run --example discv5 -- 127.0.0.1 9001 <BASE64_ENR> <GENERATE_KEY> 
+//! sh cargo run --example discv5 -- 127.0.0.1 9001 <BASE64_ENR> <GENERATE_KEY>
 //! ```
 //!
 //! where `<BASE64_ENR>` is the base64 ENR given from executing the first node and `<GENERATE_KEY>` is a boolean (`true` or `false`) specifying if new key should be generated. These steps can be
@@ -60,11 +60,11 @@ fn main() {
         183, 28, 113, 166, 126, 17, 119, 173, 78, 144, 22, 149, 225, 180, 185, 238, 23, 174, 22,
         198, 102, 141, 49, 62, 172, 47, 150, 219, 205, 163, 242, 145,
     ];
-        let secret_key = identity::secp256k1::SecretKey::from_bytes(raw_key).unwrap();
-        let mut keypair = identity::Keypair::Secp256k1(identity::secp256k1::Keypair::from(secret_key));
+    let secret_key = identity::secp256k1::SecretKey::from_bytes(raw_key).unwrap();
+    let mut keypair = identity::Keypair::Secp256k1(identity::secp256k1::Keypair::from(secret_key));
 
     if let Some(generate_key) = std::env::args().nth(4) {
-        if generate_key.parse::<bool>().unwrap() { 
+        if generate_key.parse::<bool>().unwrap() {
             keypair = identity::Keypair::generate_secp256k1();
         }
     }
@@ -102,7 +102,7 @@ fn main() {
     swarm.find_node(target_random_node_id);
 
     // construct a 30 second interval to search for new peers.
-    let mut query_interval = tokio::timer::Interval::new_interval(Duration::from_secs(30));
+    let mut query_interval = tokio::timer::Interval::new_interval(Duration::from_secs(10));
 
     // Kick it off!
     tokio::run(futures::future::poll_fn(move || -> Result<_, ()> {
