@@ -1,5 +1,8 @@
 #![cfg(test)]
 
+use crate::behaviour::RpcRequest;
+use crate::kbucket::*;
+use crate::*;
 use crate::{Discv5, Discv5Event};
 use env_logger;
 use libp2p_core::{
@@ -15,8 +18,11 @@ use enr::NodeId;
 use enr::{Enr, EnrBuilder};
 use libp2p_secio::SecioConfig;
 use libp2p_yamux as yamux;
+use rand_core::{RngCore, SeedableRng};
+use rand_xorshift;
+use std::collections::HashMap;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -46,7 +52,7 @@ fn build_swarms(n: usize, base_port: u16) -> Vec<SwarmType> {
             .map(|(p, m), _| (p, StreamMuxerBox::new(m)))
             .map_err(|e| panic!("Failed to create transport: {:?}", e))
             .boxed();
-        let discv5 = Discv5::new(enr, keypair.clone(), ip.into()).unwrap();
+        let discv5 = Discv5::new(enr, keypair.clone(), ip.into(), false).unwrap();
         swarms.push(Swarm::new(
             transport,
             discv5,
@@ -79,7 +85,7 @@ fn build_swarms_from_keypairs(keypairs: Vec<identity::Keypair>) -> Vec<SwarmType
             .map(|(p, m), _| (p, StreamMuxerBox::new(m)))
             .map_err(|e| panic!("Failed to create transport: {:?}", e))
             .boxed();
-        let discv5 = Discv5::new(enr, keypair.clone(), ip.into()).unwrap();
+        let discv5 = Discv5::new(enr, keypair.clone(), ip.into(), false).unwrap();
         swarms.push(Swarm::new(
             transport,
             discv5,
@@ -89,51 +95,89 @@ fn build_swarms_from_keypairs(keypairs: Vec<identity::Keypair>) -> Vec<SwarmType
     swarms
 }
 
-/// Return log2 distance between 2 node ids
+/// Generate `n` deterministic keypairs from a given seed.
+fn generate_deterministic_keypair(n: usize, seed: u64) -> Vec<identity::Keypair> {
+    let mut keypairs = Vec::new();
+    for i in 0..n {
+        let sk = {
+            let rng = &mut rand_xorshift::XorShiftRng::seed_from_u64(seed + i as u64);
+            let mut b = [0; secp256k1::util::SECRET_KEY_SIZE];
+            loop {
+                // until a value is given within the curve order
+                rng.fill_bytes(&mut b);
+                if let Ok(k) = identity::secp256k1::SecretKey::from_bytes(&mut b) {
+                    break k;
+                }
+            }
+        };
+        let kp = identity::Keypair::Secp256k1(identity::secp256k1::Keypair::from(sk));
+        keypairs.push(kp);
+    }
+    keypairs
+}
+
 fn get_distance(node1: &NodeId, node2: &NodeId) -> Option<u64> {
     let node1: kbucket::Key<NodeId> = node1.clone().into();
     node1.log2_distance(&node2.clone().into())
 }
 
-/// Generate `n` keypairs such that the node ids they generate are close to
-/// the generated bootstrap node. Return the `n` nodes along with the bootstrap node.
-fn generate_keypairs(n: usize) -> Vec<identity::Keypair> {
-    let mut keypairs: Vec<identity::Keypair> = Vec::new();
-    let bootstrap_keypair = identity::Keypair::generate_secp256k1();
-    let bootstrap_node_id = EnrBuilder::new("v4")
-        .build(&bootstrap_keypair)
-        .unwrap()
-        .node_id()
-        .clone();
-    for _ in 0..n {
-        loop {
-            let keypair = identity::Keypair::generate_secp256k1();
-            let enr = EnrBuilder::new("v4").build(&keypair).unwrap();
-            let key = enr.node_id();
-            let distance = get_distance(&bootstrap_node_id, key).unwrap();
-            // Any distance > 254 should be good enough for discovering nodes in one
-            // complete query
-            if distance > 254 {
-                keypairs.push(keypair);
-                break;
+// Simple searching function to find seeds that give node ids for a range of testing and different
+// topologies
+#[allow(dead_code)]
+fn find_seed() {
+    let mut found = false;
+    let mut buckets = HashMap::new();
+    let mut seed = 1;
+    while !found {
+        let keys = generate_deterministic_keypair(11, seed);
+
+        let node_ids = keys
+            .iter()
+            .map(|k| NodeId::from(k.public()))
+            .collect::<Vec<_>>();
+
+        let local = node_ids[0].clone();
+
+        buckets = HashMap::new();
+
+        for id in node_ids[1..].iter() {
+            let distance = get_distance(&local, id);
+            if let Some(distance) = distance {
+                *buckets.entry(distance).or_insert_with(|| 0) += 1;
             }
         }
+        if buckets.values().find(|v| **v > 2) == None {
+            found = true;
+        }
+        seed += 1;
+        if seed % 1000 == 0 {
+            println!("Seed: {}", seed);
+        }
     }
-    keypairs.push(bootstrap_keypair);
-    keypairs
+    println!("Found Seed: {}", seed);
+    for (k, v) in buckets.iter() {
+        println!("{}, {}", k, v);
+    }
 }
 
+/// Test for a star topology with `num_nodes` connected to a `bootstrap_node`
+/// FINDNODE request is sent from any of the `num_nodes` nodes to a `target_node`
+/// which isn't part of the swarm.
+/// The seed for the keypair generation is chosen such that all `num_nodes` nodes
+/// and the `target_node` are in the 256th k-bucket of the bootstrap node.
+/// This ensures that all nodes are found in a single FINDNODE query.
 #[test]
 fn test_discovery_star_topology() {
     init();
     let node_num = 12;
-    // Generate `num_nodes` nodes with the bootstrap node and 1 target_node
-    let keypairs = generate_keypairs(node_num + 1);
+    // Seed is chosen such that all nodes are in the 256th bucket of bootstrap
+    let seed = 1654;
+    // Generate `num_nodes` + bootstrap_node and target_node keypairs from given seed
+    let keypairs = generate_deterministic_keypair(node_num + 2, seed);
     let mut swarms = build_swarms_from_keypairs(keypairs);
     // Last node is bootstrap node in a star topology
     let mut bootstrap_node = swarms.pop().unwrap();
-    // target_node is a node "close" to the bootstrap node for the FINDNODE query
-    //target_node is not polled.
+    // target_node is not polled.
     let target_node = swarms.pop().unwrap();
     println!("Bootstrap node: {}", bootstrap_node.local_enr().node_id());
     println!("Target node: {}", target_node.local_enr().node_id());
@@ -253,4 +297,140 @@ fn test_findnode_query() {
     );
 
     assert!(*test_result.lock().unwrap());
+}
+
+#[test]
+fn test_updating_connection_on_ping() {
+    let keypair = identity::Keypair::generate_secp256k1();
+    let ip: IpAddr = "127.0.0.1".parse().unwrap();
+    let enr = EnrBuilder::new("v4")
+        .ip(ip.clone().into())
+        .udp(10001)
+        .build(&keypair)
+        .unwrap();
+    let ip2: IpAddr = "127.0.0.1".parse().unwrap();
+    let keypair2 = identity::Keypair::generate_secp256k1();
+    let enr2 = EnrBuilder::new("v4")
+        .ip(ip2.clone().into())
+        .udp(10002)
+        .build(&keypair2)
+        .unwrap();
+
+    // Set up discv5 with one disconnected node
+    let mut discv5: Discv5<Box<u64>> = Discv5::new(enr, keypair.clone(), ip.into(), false).unwrap();
+    discv5.add_enr(enr2.clone());
+    discv5.connection_updated(enr2.node_id().clone(), None, NodeStatus::Disconnected);
+
+    let mut buckets = discv5.kbuckets.clone();
+    let mut node = buckets.iter().next().unwrap();
+    assert_eq!(node.status, NodeStatus::Disconnected);
+
+    // Add a fake request
+    let ping_response = rpc::Response::Ping {
+        enr_seq: 2,
+        ip: ip2,
+        port: 10002,
+    };
+    let ping_request = rpc::Request::Ping { enr_seq: 2 };
+    let req = RpcRequest(2, enr2.node_id().clone());
+    discv5
+        .active_rpc_requests
+        .insert(req, (Some(1), ping_request.clone()));
+
+    // Handle the ping and expect the disconnected Node to become connected
+    discv5.handle_rpc_response(enr2.node_id().clone(), 2, ping_response);
+    buckets = discv5.kbuckets.clone();
+
+    node = buckets.iter().next().unwrap();
+    assert_eq!(node.status, NodeStatus::Connected);
+}
+
+// The kbuckets table can have maximum 10 nodes in the same /24 subnet across all buckets
+#[test]
+fn test_table_limits() {
+    // this seed generates 12 node id's that are distributed accross buckets such that no more than
+    // 2 exist in a single bucket.
+    let keypairs = generate_deterministic_keypair(12, 9487);
+    let ip: IpAddr = "127.0.0.1".parse().unwrap();
+    let local_enr = EnrBuilder::new("v4")
+        .ip(ip.clone().into())
+        .udp(9050)
+        .build(&keypairs[0])
+        .unwrap();
+    let mut discv5: Discv5<Box<u64>> =
+        Discv5::new(local_enr, keypairs[0].clone(), ip.into(), true).unwrap();
+    let table_limit: usize = 10;
+    // Generate `table_limit + 2` nodes in the same subnet.
+    let enrs: Vec<Enr> = (1..=table_limit + 1)
+        .map(|i| {
+            let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, i as u8));
+            EnrBuilder::new("v4")
+                .ip(ip.clone().into())
+                .udp(9050 + i as u16)
+                .build(&keypairs[i])
+                .unwrap()
+        })
+        .collect();
+    for enr in enrs {
+        discv5.add_enr(enr.clone());
+    }
+    // Number of entries should be `table_limit`, i.e one node got restricted
+    assert_eq!(
+        discv5.kbuckets_entries().collect::<Vec<_>>().len(),
+        table_limit
+    );
+}
+
+// Each bucket can have maximum 2 nodes in the same /24 subnet
+#[test]
+fn test_bucket_limits() {
+    let keypair = identity::Keypair::generate_secp256k1();
+    let ip: IpAddr = "127.0.0.1".parse().unwrap();
+    let enr = EnrBuilder::new("v4")
+        .ip(ip.clone().into())
+        .udp(9500)
+        .build(&keypair)
+        .unwrap();
+    let bucket_limit: usize = 2;
+    // Generate `bucket_limit + 1` keypairs that go in `enr` node's 256th bucket.
+    let keypairs = {
+        let mut keypairs = Vec::new();
+        for _ in 0..bucket_limit + 1 {
+            loop {
+                let keypair = identity::Keypair::generate_secp256k1();
+                let enr_new = EnrBuilder::new("v4").build(&keypair).unwrap();
+                let key: kbucket::Key<NodeId> = enr.node_id().clone().into();
+                let distance = key
+                    .log2_distance(&enr_new.node_id().clone().into())
+                    .unwrap();
+                if distance == 256 {
+                    keypairs.push(keypair);
+                    break;
+                }
+            }
+        }
+        keypairs
+    };
+    // Generate `bucket_limit + 1` nodes in the same subnet.
+    let enrs: Vec<Enr> = (1..=bucket_limit + 1)
+        .map(|i| {
+            let kp = &keypairs[i - 1];
+            let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, i as u8));
+            EnrBuilder::new("v4")
+                .ip(ip.clone().into())
+                .udp(9500 + i as u16)
+                .build(kp)
+                .unwrap()
+        })
+        .collect();
+    let mut discv5: Discv5<Box<u64>> = Discv5::new(enr, keypair.clone(), ip.into(), true).unwrap();
+    for enr in enrs {
+        discv5.add_enr(enr.clone());
+    }
+
+    // Number of entries should be equal to `bucket_limit`.
+    assert_eq!(
+        discv5.kbuckets_entries().collect::<Vec<_>>().len(),
+        bucket_limit
+    );
 }
