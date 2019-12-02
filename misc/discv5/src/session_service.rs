@@ -40,7 +40,7 @@ use tokio_timer::Delay;
 mod tests;
 
 /// Seconds before a timeout expires.
-const REQUEST_TIMEOUT: u64 = 10;
+const REQUEST_TIMEOUT: u64 = 5;
 /// The number of times to retry a request.
 const REQUEST_RETRIES: u8 = 2;
 /// The timeout for a Session.
@@ -384,7 +384,7 @@ impl SessionService {
                 let messages = self
                     .pending_messages
                     .get_mut(&src_id)
-                    .ok_or_else(|| error!("No pending messages found for WHOAREYOU request."))?;
+                    .ok_or_else(|| warn!("No pending messages found for WHOAREYOU request."))?;
 
                 if messages.is_empty() {
                     // This could happen for an established connection and another peer (from the

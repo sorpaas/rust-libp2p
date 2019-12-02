@@ -27,7 +27,11 @@ impl IpVote {
         );
     }
 
-    pub fn majority(&mut self) -> Option<SocketAddr> {
+    /// Returns the majority `SocketAddr`. This is simply the `SocketAddr` supplied if it is still
+    /// the majority, otherwise returns a new `SocketAddr` which has the most votes. If the
+    /// supplied `SocketAddr` has the same number of votes as another `SocketAddr`, the supplied
+    /// `SocketAddr` is returned.
+    pub fn majority(&mut self, current_socket_addr: SocketAddr) -> SocketAddr {
         // remove expired
         let instant = Instant::now();
         self.votes.retain(|_, v| v.1 > instant);
@@ -38,6 +42,60 @@ impl IpVote {
             *ip_count.entry(*socket).or_insert_with(|| 0) += 1;
         }
 
-        ip_count.into_iter().max_by_key(|v| v.1).map(|v| v.0)
+        let current_majority = ip_count
+            .get(&current_socket_addr)
+            .cloned()
+            .unwrap_or_else(|| 0);
+
+        // find the maximum socket addr
+        ip_count
+            .into_iter()
+            .filter(|v| v.1 > current_majority)
+            .max_by_key(|v| v.1)
+            .map(|v| v.0)
+            .unwrap_or_else(|| current_socket_addr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IpVote, NodeId, SocketAddr};
+
+    #[test]
+    fn test_three_way_vote_draw() {
+        let mut votes = IpVote::new();
+        let socket_1 = SocketAddr::new("127.0.0.1".parse().unwrap(), 1);
+        let node_1 = NodeId::random();
+        let socket_2 = SocketAddr::new("127.0.0.1".parse().unwrap(), 2);
+        let node_2 = NodeId::random();
+        let socket_3 = SocketAddr::new("127.0.0.1".parse().unwrap(), 3);
+        let node_3 = NodeId::random();
+
+        votes.insert(node_1, socket_1);
+        votes.insert(node_2, socket_2);
+        votes.insert(node_3, socket_3);
+
+        assert_eq!(votes.majority(socket_1), socket_1);
+        assert_eq!(votes.majority(socket_2), socket_2);
+        assert_eq!(votes.majority(socket_3), socket_3);
+    }
+
+    #[test]
+    fn test_majority_vote() {
+        let mut votes = IpVote::new();
+        let socket_1 = SocketAddr::new("127.0.0.1".parse().unwrap(), 1);
+        let node_1 = NodeId::random();
+        let socket_2 = SocketAddr::new("127.0.0.1".parse().unwrap(), 2);
+        let node_2 = NodeId::random();
+        let socket_3 = SocketAddr::new("127.0.0.1".parse().unwrap(), 2);
+        let node_3 = NodeId::random();
+
+        votes.insert(node_1, socket_1);
+        votes.insert(node_2, socket_2);
+        votes.insert(node_3, socket_3);
+
+        assert_eq!(votes.majority(socket_1), socket_2);
+        assert_eq!(votes.majority(socket_2), socket_2);
+        assert_eq!(votes.majority(socket_3), socket_2);
     }
 }

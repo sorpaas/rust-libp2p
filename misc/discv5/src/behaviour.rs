@@ -237,6 +237,12 @@ impl<TSubstream> Discv5<TSubstream> {
         self.kbuckets.iter().map(|entry| entry.node.key.preimage())
     }
 
+    /// Returns an iterator over all the ENR's of nodes currently contained in a bucket of
+    /// the Kademlia routing table.
+    pub fn enr_entries(&mut self) -> impl Iterator<Item = &Enr> {
+        self.kbuckets.iter().map(|entry| entry.node.value)
+    }
+
     /// Starts an iterative `FIND_NODE` request.
     ///
     /// This will eventually produce an event containing the nodes of the DHT closest to the
@@ -391,13 +397,31 @@ impl<TSubstream> Discv5<TSubstream> {
                 }
                 rpc::Response::Ping { enr_seq, ip, port } => {
                     let socket = SocketAddr::new(ip, port);
-                    self.ip_votes.insert(node_id.clone(), socket);
-                    if self.ip_votes.majority() != self.local_enr().udp_socket() {
-                        info!("Local IP Address updated to: {}", socket);
-                        self.events.push(Discv5Event::SocketUpdated(socket));
-                        if self.service.update_local_enr_socket(socket, false) {
-                            // alert known peers to our updated enr
-                            self.ping_connected_peers();
+                    self.ip_votes.insert(node_id.clone(), socket.clone());
+
+                    match self.local_enr().udp_socket() {
+                        Some(local_socket) => {
+                            let majority_socket = self.ip_votes.majority(local_socket.clone());
+                            if majority_socket != local_socket {
+                                info!("Local UDP socket updated to: {}", majority_socket);
+                                self.events
+                                    .push(Discv5Event::SocketUpdated(majority_socket));
+                                if self.service.update_local_enr_socket(majority_socket, false) {
+                                    // alert known peers to our updated enr
+                                    self.ping_connected_peers();
+                                }
+                            }
+                        }
+                        None => {
+                            // current UDP socket not in the ENR, update to the majority regardless
+                            let majority_socket = self.ip_votes.majority(socket.clone());
+                            info!("Local UDP socket updated to: {}", majority_socket);
+                            self.events
+                                .push(Discv5Event::SocketUpdated(majority_socket));
+                            if self.service.update_local_enr_socket(majority_socket, false) {
+                                // alert known peers to our updated enr
+                                self.ping_connected_peers();
+                            }
                         }
                     }
 
@@ -816,6 +840,15 @@ impl<TSubstream> Discv5<TSubstream> {
                                 nodes_response.received_nodes,
                                 query_id_option,
                             );
+                        }
+                    } else {
+                        // there was no partially downloaded nodes inform the query of the failure
+                        // if it's part of a query
+                        debug!("RPC Request: {:?} failed for node: {}", request, node_id);
+                        if let Some(query_id) = query_id_option {
+                            if let Some(query) = self.active_queries.get_mut(&query_id) {
+                                query.on_failure(&node_id);
+                            }
                         }
                     }
                 }
