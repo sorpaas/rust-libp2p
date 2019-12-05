@@ -216,7 +216,7 @@ impl Packet {
         })
     }
 
-    /// Decodes a regular message into a `Packet`.
+    /// Decodes a regular message (or `RandomPacket`) into a `Packet`.
     fn decode_standard_message(tag: Tag, data: &[u8]) -> Result<Self, PacketError> {
         let rlp = rlp::Rlp::new(&data[TAG_LENGTH..=TAG_LENGTH + AUTH_TAG_LENGTH]);
         let auth_tag_bytes: Vec<u8> = match rlp.as_val() {
